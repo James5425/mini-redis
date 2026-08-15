@@ -11,8 +11,7 @@ fn main() {
 }
 
 fn handle_client(mut stream: TcpStream) {
-    let mut request: Vec<u8> = Vec::new();
-    let mut request_size: usize = 0; // Feels like a overflow issue for later
+    let mut buffer: Vec<u8> = Vec::new();
     let mut temp_buff: [u8; 1024] = [0; 1024];
 
     loop {
@@ -22,12 +21,16 @@ fn handle_client(mut stream: TcpStream) {
             break;
         }
 
-        request.extend_from_slice(&temp_buff);
-        
-        request_size += size;
+        buffer.extend_from_slice(&temp_buff[..size]);
+        loop {
+            match try_parse_request(&buffer) {
+                Some((_elements, consumed)) => {
+                    buffer.drain(..consumed);
+                },
+                None => break,
+            }
+        }
     }
-    let text = String::from_utf8_lossy(&request[0..request_size]);
-    println!("{:?}", text);
 }
 
 
