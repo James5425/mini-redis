@@ -26,8 +26,8 @@ fn handle_client(mut stream: TcpStream) {
             match try_parse_request(&buffer) {
                 Some((elements, consumed)) => {
                     let response = dispatch(&elements);
-                    println!("{:?}", str::from_utf8(elements.as_slice()));
-                    stream.write_all(&response);
+                    println!("{:?}", elements.iter().map(|e| String::from_utf8_lossy(e)).collect::<Vec<_>>());
+                    stream.write_all(&response).unwrap();
                     buffer.drain(..consumed);
                 },
                 None => break,
