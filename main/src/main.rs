@@ -1,5 +1,5 @@
-use core::num;
-use std::{collections::HashMap, fmt::{Error, Result}, io::{Read, Write}, iter::Zip, net::{TcpListener, TcpStream}, sync::{Arc, Mutex}, thread};
+use core::{num, str};
+use std::{collections::HashMap, io::{Read, Write}, iter::Zip, net::{TcpListener, TcpStream}, sync::{Arc, Mutex}, thread};
 
 enum Reply {
     Ok,
@@ -9,12 +9,24 @@ enum Reply {
     Error(String),
 }
 
+enum Action {
+    Set,
+    Del,
+    Get
+}
+
+enum RequestError {
+    Missing,
+    InvalidUtf8,
+    UnknownCommand(String),
+}
+
 fn main() {
-    let key_value_store: Arc<Mutex<HashMap<Vec<u8>, Vec<u8>>>> = Arc::new(Mutex::new(HashMap::<Vec<u8>, Vec<u8>>::new()));
+    let store: Arc<Mutex<HashMap<Vec<u8>, Vec<u8>>>> = Arc::new(Mutex::new(HashMap::<Vec<u8>, Vec<u8>>::new()));
     let listener = TcpListener::bind("127.0.0.1:6123").unwrap();
 
     for stream in listener.incoming() {
-        let kv_store = Arc::clone(&key_value_store);
+        let kv_store = Arc::clone(&store);
         thread::spawn(|| {
             handle_client(stream.unwrap(), kv_store);
         });
@@ -91,7 +103,39 @@ fn try_parse_request(buf: &[u8]) -> Option<(Vec<Vec<u8>>, usize)>  {
 }
 
 fn dispatch(elements: &Vec<Vec<u8>>, kv_store: Arc<Mutex<HashMap<Vec<u8>, Vec<u8>>>>) -> Reply {
-    Reply::Ok
+    let mut data = kv_store.lock().unwrap();
+    match request_type(elements) {
+        Ok(action) => match action {
+            Action::Set => {
+                data.insert(elements.get(1).unwrap().clone(), elements.get(2).unwrap().clone());
+                Reply::Ok
+            },
+            Action::Del => {
+                data.remove(elements.get(1).unwrap());
+                Reply::Ok
+            },
+            Action::Get => {
+                let val = data.get(elements.get(1).unwrap()).unwrap().clone();
+                Reply::Bulk(val)
+            },
+        },
+        Err(err) => Reply::Error(err.into()),
+    }
+}
+
+fn request_type(elements: &[Vec<u8>]) -> Result<Action, RequestError> {
+    let first = elements.first().ok_or(RequestError::Missing)?;
+    parse_action(first)
+}
+
+fn parse_action(element: &[u8]) -> Result<Action, RequestError> {
+    let command = std::str::from_utf8(element).map_err(|_| RequestError::InvalidUtf8)?;
+    match command {
+        c if c.eq_ignore_ascii_case("set") => Ok(Action::Set),
+        c if c.eq_ignore_ascii_case("del") => Ok(Action::Del),
+        c if c.eq_ignore_ascii_case("get") => Ok(Action::Get),
+        other => Err(RequestError::UnknownCommand(other.to_string())),
+    }
 }
 
 impl From<Reply> for Vec<u8> {
@@ -105,8 +149,14 @@ impl From<Reply> for Vec<u8> {
                 out
             },
             Reply::Nil => b"$-1\r\n".to_vec(),
-            Reply::Int(n) => format!(":{}{}\n\r", if n > 0 { '+' } else { '-' }, n).into_bytes(),
+            Reply::Int(n) => format!(":{}\r\n", n).into_bytes(),
             Reply::Error(msg) => format!("-{}\r\n", msg).into_bytes(),
         }
+    }
+}
+
+impl From<RequestError> for String {
+    fn from(value: RequestError) -> Self {
+        format!("ERROR")
     }
 }
