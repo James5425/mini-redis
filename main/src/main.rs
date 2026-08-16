@@ -1,16 +1,27 @@
 use core::num;
-use std::{fmt::{Error, Result}, io::{Read, Write}, iter::Zip, net::{TcpListener, TcpStream}};
+use std::{collections::HashMap, fmt::{Error, Result}, io::{Read, Write}, iter::Zip, net::{TcpListener, TcpStream}, sync::{Arc, Mutex}, thread};
 
+enum Reply {
+    Ok,
+    Bulk(Vec<u8>),
+    Nil,
+    Int(i64),
+    Error(String),
+}
 
 fn main() {
+    let key_value_store: Arc<Mutex<HashMap<Vec<u8>, Vec<u8>>>> = Arc::new(Mutex::new(HashMap::<Vec<u8>, Vec<u8>>::new()));
     let listener = TcpListener::bind("127.0.0.1:6123").unwrap();
 
     for stream in listener.incoming() {
-        handle_client(stream.unwrap());
+        let kv_store = Arc::clone(&key_value_store);
+        thread::spawn(|| {
+            handle_client(stream.unwrap(), kv_store);
+        });
     }
 }
 
-fn handle_client(mut stream: TcpStream) {
+fn handle_client(mut stream: TcpStream, kv_store: Arc<Mutex<HashMap<Vec<u8>, Vec<u8>>>>) {
     let mut buffer: Vec<u8> = Vec::new();
     let mut temp_buff: [u8; 1024] = [0; 1024];
 
@@ -25,7 +36,8 @@ fn handle_client(mut stream: TcpStream) {
         loop {
             match try_parse_request(&buffer) {
                 Some((elements, consumed)) => {
-                    let response = dispatch(&elements);
+                    let kv_store = Arc::clone(&kv_store);
+                    let response: Vec<u8> = dispatch(&elements, kv_store).into();
                     println!("{:?}", elements.iter().map(|e| String::from_utf8_lossy(e)).collect::<Vec<_>>());
                     stream.write_all(&response).unwrap();
                     buffer.drain(..consumed);
@@ -78,6 +90,23 @@ fn try_parse_request(buf: &[u8]) -> Option<(Vec<Vec<u8>>, usize)>  {
     return Some((elements, pos));
 }
 
-fn dispatch(elements: &Vec<Vec<u8>>) -> Vec<u8> {
-    return b"+OK\r\n".to_vec()
+fn dispatch(elements: &Vec<Vec<u8>>, kv_store: Arc<Mutex<HashMap<Vec<u8>, Vec<u8>>>>) -> Reply {
+    Reply::Ok
+}
+
+impl From<Reply> for Vec<u8> {
+    fn from(value: Reply) -> Self {
+        match value {
+            Reply::Ok => b"+OK\r\n".to_vec(),
+            Reply::Bulk(data) => {
+                let mut out = format!("${}\r\n", data.len()).into_bytes();
+                out.extend_from_slice(&data);
+                out.extend(b"\r\n");
+                out
+            },
+            Reply::Nil => b"$-1\r\n".to_vec(),
+            Reply::Int(n) => format!(":{}{}\n\r", if n > 0 { '+' } else { '-' }, n).into_bytes(),
+            Reply::Error(msg) => format!("-{}\r\n", msg).into_bytes(),
+        }
+    }
 }
