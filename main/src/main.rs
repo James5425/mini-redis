@@ -157,6 +157,10 @@ impl From<Reply> for Vec<u8> {
 
 impl From<RequestError> for String {
     fn from(value: RequestError) -> Self {
-        format!("ERROR")
+        match value {
+            RequestError::Missing => String::from("ERR missing argument(s)"),
+            RequestError::InvalidUtf8 => String::from("ERR invalid data"),
+            RequestError::UnknownCommand(msg) => String::from(format!("ERR unknown command \'{}\'", msg)),
+        }
     }
 }
