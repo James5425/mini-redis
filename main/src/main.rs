@@ -1,5 +1,4 @@
-use core::{num, str};
-use std::{collections::HashMap, io::{Read, Write}, iter::Zip, net::{TcpListener, TcpStream}, sync::{Arc, Mutex}, thread};
+use std::{collections::HashMap, io::{Read, Write}, net::{TcpListener, TcpStream}, sync::{Arc, Mutex, MutexGuard}, thread};
 
 enum Reply {
     Ok,
@@ -20,6 +19,8 @@ enum RequestError {
     InvalidUtf8,
     UnknownCommand(String),
 }
+
+type Store = Mutex<HashMap<Vec<u8>, Vec<u8>>>;
 
 fn main() {
     let store: Arc<Mutex<HashMap<Vec<u8>, Vec<u8>>>> = Arc::new(Mutex::new(HashMap::<Vec<u8>, Vec<u8>>::new()));
@@ -103,25 +104,89 @@ fn try_parse_request(buf: &[u8]) -> Option<(Vec<Vec<u8>>, usize)>  {
 }
 
 fn dispatch(elements: &Vec<Vec<u8>>, kv_store: Arc<Mutex<HashMap<Vec<u8>, Vec<u8>>>>) -> Reply {
-    let mut data = kv_store.lock().unwrap();
     match request_type(elements) {
         Ok(action) => match action {
             Action::Set => {
-                data.insert(elements.get(1).unwrap().clone(), elements.get(2).unwrap().clone());
-                Reply::Ok
+                set_value(elements, &kv_store)
             },
             Action::Del => {
-                data.remove(elements.get(1).unwrap());
-                Reply::Ok
+                delete_item(elements, &kv_store)
             },
             Action::Get => {
-                let val = data.get(elements.get(1).unwrap()).unwrap().clone();
-                Reply::Bulk(val)
+                get_item(elements, &kv_store)
             },
         },
         Err(err) => Reply::Error(err.into()),
     }
 }
+
+/// Sets the value of key. If the key exists it is overwritten.
+fn set_value(elements: &[Vec<u8>], kv_store: &Store) -> Reply {
+    let [_, key, value] = elements else {
+        return Reply::Error("ERR wrong number of arguments for 'set' command".into());
+    };
+
+    let mut data = kv_store.lock_recover();
+
+    data.insert(key.clone(), value.clone());
+    Reply::Ok
+}
+
+/// Deletes keys from the store if they exist.
+fn delete_item(elements: &[Vec<u8>], kv_store: &Store) -> Reply {
+    let mut count = 0;
+
+    let [_, keys @ ..] = elements else {
+        return Reply::Error("ERR wrong number of arguments for 'set' command".into());
+    };
+
+    let mut data = kv_store.lock_recover();
+
+    keys.iter().for_each(|key| {
+        match data.remove(key) {
+            Some(_) => count += 1,
+            None => {},
+        }
+    });
+
+    Reply::Int(count)
+}
+
+/// Get the value of key. If the key does not exist, nil is returned. An error is returned if the value stored 
+/// at key is not a string, because GET only handles string values.
+fn get_item(elements: &[Vec<u8>], kv_store: &Store) -> Reply {
+    let [_, key] = elements else {
+        return Reply::Error("ERR wrong number of arguments for 'get' command".into());
+    };
+
+    let data = kv_store.lock_recover();
+
+    match data.get(key) {
+        Some(val) => Reply::Bulk(val.clone()),
+        None => Reply::Nil,
+    }
+}
+
+trait LockRecover<T>
+where
+    T: ?Sized
+{
+    fn lock_recover(&self) -> MutexGuard<'_, T>;
+}
+
+impl<T> LockRecover<T> for Mutex<T> 
+where
+    T: ?Sized
+{
+    fn lock_recover(&self) -> MutexGuard<'_, T> {
+        self.lock().unwrap_or_else(|e| {
+            eprintln!("WARN: store mutex was poisoned by a panicking thread; recovering");
+            self.clear_poison();
+            e.into_inner()
+        })
+    }
+}
+
 
 fn request_type(elements: &[Vec<u8>]) -> Result<Action, RequestError> {
     let first = elements.first().ok_or(RequestError::Missing)?;
@@ -160,7 +225,7 @@ impl From<RequestError> for String {
         match value {
             RequestError::Missing => String::from("ERR missing argument(s)"),
             RequestError::InvalidUtf8 => String::from("ERR invalid data"),
-            RequestError::UnknownCommand(msg) => String::from(format!("ERR unknown command \'{}\'", msg)),
+            RequestError::UnknownCommand(msg) => format!("ERR unknown command \'{}\'", msg),
         }
     }
 }
