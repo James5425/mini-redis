@@ -18,12 +18,27 @@ enum RequestError {
     Missing,
     InvalidUtf8,
     UnknownCommand(String),
+    InvalidFormat
+}
+
+enum Parsed {
+    Complete(Vec<Vec<u8>>, usize),
+    Incomplete
+}
+
+enum ProtocolError {
+    Malformed,
+    BadLength
 }
 
 type Store = Mutex<HashMap<Vec<u8>, Vec<u8>>>;
 
+const MAX_BULK_LEN: usize = 512 * 1024 * 1024;
+const MAX_MULTIBULK: usize = 1024 * 1024;
+const MAX_ERR_LEN: usize = 128;
+
 fn main() {
-    let store: Arc<Mutex<HashMap<Vec<u8>, Vec<u8>>>> = Arc::new(Mutex::new(HashMap::<Vec<u8>, Vec<u8>>::new()));
+    let store: Arc<Store> = Arc::new(Mutex::new(HashMap::<Vec<u8>, Vec<u8>>::new()));
     let listener = TcpListener::bind("127.0.0.1:6123").unwrap();
 
     for stream in listener.incoming() {
@@ -34,86 +49,116 @@ fn main() {
     }
 }
 
-fn handle_client(mut stream: TcpStream, kv_store: Arc<Mutex<HashMap<Vec<u8>, Vec<u8>>>>) {
+fn handle_client(mut stream: TcpStream, kv_store: Arc<Store>) {
     let mut buffer: Vec<u8> = Vec::new();
     let mut temp_buff: [u8; 1024] = [0; 1024];
 
     loop {
-        let size = stream.read(&mut temp_buff).unwrap();
-        
-        if size == 0 {
-            break;
-        }
-
-        buffer.extend_from_slice(&temp_buff[..size]);
-        loop {
+        loop {    
             match try_parse_request(&buffer) {
-                Some((elements, consumed)) => {
-                    let kv_store = Arc::clone(&kv_store);
-                    let response: Vec<u8> = dispatch(&elements, kv_store).into();
-                    println!("{:?}", elements.iter().map(|e| String::from_utf8_lossy(e)).collect::<Vec<_>>());
+                Ok(Parsed::Complete(elements, consumed)) => {
+                    let response: Vec<u8> = dispatch(&elements, &kv_store).into();
                     stream.write_all(&response).unwrap();
                     buffer.drain(..consumed);
-                },
-                None => break,
+                }
+                Ok(Parsed::Incomplete) => break,
+                Err(e) => {
+                    let _ = stream.write_all(&Vec::from(Reply::Error(e.into())));
+                    return;
+                }
             }
+        }
+
+        match stream.read(&mut temp_buff) {
+            Ok(0) => return,
+            Ok(n)  => buffer.extend_from_slice(&temp_buff[..n]),
+            Err(_) => return
         }
     }
 }
 
 
-/// returns the index from the START of the provided buf to the end of a redis request segment denoted by \r\n
+/// Returns the index from the START of the provided buf to the end of a redis request segment denoted by \r\n
 fn find_crlf(buf: &[u8]) -> Option<usize> {
     buf.windows(2).position(|w| w == b"\r\n")
 }
 
-/// Tries to parse a redis style request, returns None if malformed or if it is missing bytes
-fn try_parse_request(buf: &[u8]) -> Option<(Vec<Vec<u8>>, usize)>  {
+/// Tries to parse a redis style request, returns ProtocolError on malformed input or Parsed enum.
+fn try_parse_request(buf: &[u8]) -> Result<Parsed, ProtocolError>  {
     let mut pos = 0;
 
-    if buf.first() != Some(&b'*') {
-        return None
+    match buf.first() {
+        None => return Ok(Parsed::Incomplete),
+        Some(&b'*') => {}
+        Some(_) => return Err(ProtocolError::Malformed),
     }
+
     pos += 1;
 
-    let crlf = find_crlf(&buf[pos..])?;
+    let crlf = match find_crlf(&buf[pos..]) {
+        Some(idx) => idx,
+        None => return Ok(Parsed::Incomplete)
+    };
 
-    let number_of_elements: usize = std::str::from_utf8(&buf[pos..pos + crlf]).ok()?.parse().ok()?;
-    
+    let number_of_elements: usize = std::str::from_utf8(&buf[pos..pos + crlf])
+        .map_err(|_| ProtocolError::Malformed)?
+        .parse()
+        .map_err(|_| ProtocolError::BadLength)?;
+
+    if number_of_elements > MAX_MULTIBULK {
+        return Err(ProtocolError::BadLength);
+    }
+
     pos += crlf + 2;
 
     let mut elements = Vec::with_capacity(number_of_elements);
     for _ in 0..number_of_elements {
-        if buf.get(pos) != Some(&b'$') {
-            return None;
-        }
-        pos += 1;
-        let crlf = find_crlf(&buf[pos..])?;
+        let Some(&marker) = buf.get(pos) else {
+            return Ok(Parsed::Incomplete);
+        };
 
-        let len: usize = std::str::from_utf8(&buf[pos..pos + crlf]).ok()?.parse().ok()?;
+        if marker != b'$' {
+            return Err(ProtocolError::Malformed);
+        }
+
+        pos += 1;
+
+        let crlf = match find_crlf(&buf[pos..]) {
+            Some(idx) => idx,
+            None => return Ok(Parsed::Incomplete)
+        };
+
+        let len: usize = std::str::from_utf8(&buf[pos..pos + crlf])
+            .map_err(|_| ProtocolError::Malformed)?
+            .parse()
+            .map_err(|_| ProtocolError::BadLength)?;
+
+        if len > MAX_BULK_LEN {
+            return Err(ProtocolError::BadLength);
+        }
         pos += crlf + 2;
 
         if buf.len() < pos + len + 2 {
-            return None;
+            return Ok(Parsed::Incomplete);
         }
         elements.push(buf[pos..pos + len].to_vec());
         pos += len + 2;
     }
 
-    return Some((elements, pos));
+    Ok(Parsed::Complete(elements, pos))
 }
 
-fn dispatch(elements: &Vec<Vec<u8>>, kv_store: Arc<Mutex<HashMap<Vec<u8>, Vec<u8>>>>) -> Reply {
+fn dispatch(elements: &[Vec<u8>], kv_store: &Store) -> Reply {
     match request_type(elements) {
         Ok(action) => match action {
             Action::Set => {
-                set_value(elements, &kv_store)
+                set_value(elements, kv_store)
             },
             Action::Del => {
-                delete_item(elements, &kv_store)
+                delete_item(elements, kv_store)
             },
             Action::Get => {
-                get_item(elements, &kv_store)
+                get_item(elements, kv_store)
             },
         },
         Err(err) => Reply::Error(err.into()),
@@ -134,22 +179,16 @@ fn set_value(elements: &[Vec<u8>], kv_store: &Store) -> Reply {
 
 /// Deletes keys from the store if they exist.
 fn delete_item(elements: &[Vec<u8>], kv_store: &Store) -> Reply {
-    let mut count = 0;
-
-    let [_, keys @ ..] = elements else {
-        return Reply::Error("ERR wrong number of arguments for 'set' command".into());
+    let keys = match elements {
+        [_, keys @ ..] if !keys.is_empty() => keys,
+        _ => return Reply::Error("ERR wrong number of arguments for 'del' command".into())
     };
 
     let mut data = kv_store.lock_recover();
 
-    keys.iter().for_each(|key| {
-        match data.remove(key) {
-            Some(_) => count += 1,
-            None => {},
-        }
-    });
+    let count = keys.iter().filter_map(|key| data.remove(key)).count();
 
-    Reply::Int(count)
+    Reply::Int(count as i64)
 }
 
 /// Get the value of key. If the key does not exist, nil is returned. An error is returned if the value stored 
@@ -215,7 +254,15 @@ impl From<Reply> for Vec<u8> {
             },
             Reply::Nil => b"$-1\r\n".to_vec(),
             Reply::Int(n) => format!(":{}\r\n", n).into_bytes(),
-            Reply::Error(msg) => format!("-{}\r\n", msg).into_bytes(),
+            Reply::Error(mut msg) => {
+                if msg.len() > MAX_ERR_LEN {
+                    let end = (0..=MAX_ERR_LEN).rev()
+                        .find(|&i| msg.is_char_boundary(i))
+                        .unwrap_or(0);
+                    msg.truncate(end);
+                }
+                format!("-{}\r\n", msg.replace(['\r', '\n'], " ")).into_bytes()
+            }
         }
     }
 }
@@ -225,7 +272,17 @@ impl From<RequestError> for String {
         match value {
             RequestError::Missing => String::from("ERR missing argument(s)"),
             RequestError::InvalidUtf8 => String::from("ERR invalid data"),
-            RequestError::UnknownCommand(msg) => format!("ERR unknown command \'{}\'", msg),
+            RequestError::UnknownCommand(msg) => format!("ERR unknown command \'{}\'", msg.replace(['\r', '\n'], " ")),
+            RequestError::InvalidFormat => String::from("ERR invalid request format"),
+        }
+    }
+}
+
+impl From<ProtocolError> for String {
+    fn from(value: ProtocolError) -> Self {
+        match value {
+            ProtocolError::Malformed => String::from("ERR Protocol error: malformed request."),
+            ProtocolError::BadLength => String::from("ERR Protocol error: invalid bulk length."),
         }
     }
 }
