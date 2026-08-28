@@ -1,31 +1,35 @@
 use std::{collections::HashMap, io::{Read, Write}, net::{TcpListener, TcpStream}, sync::{Arc, Mutex, MutexGuard}, thread};
 
+#[derive(Debug, PartialEq)]
 enum Reply {
     Ok,
     Bulk(Vec<u8>),
     Nil,
     Int(i64),
-    Error(String),
+    Error(String)
 }
 
+#[derive(Debug, PartialEq)]
 enum Action {
     Set,
     Del,
     Get
 }
 
+#[derive(Debug, PartialEq)]
 enum RequestError {
     Missing,
     InvalidUtf8,
-    UnknownCommand(String),
-    InvalidFormat
+    UnknownCommand(String)
 }
 
+#[derive(Debug, PartialEq)]
 enum Parsed {
     Complete(Vec<Vec<u8>>, usize),
     Incomplete
 }
 
+#[derive(Debug, PartialEq)]
 enum ProtocolError {
     Malformed,
     BadLength
@@ -36,15 +40,20 @@ type Store = Mutex<HashMap<Vec<u8>, Vec<u8>>>;
 const MAX_BULK_LEN: usize = 512 * 1024 * 1024;
 const MAX_MULTIBULK: usize = 1024 * 1024;
 const MAX_ERR_LEN: usize = 128;
+const MAX_INLINE_LEN: usize = 64;
 
 fn main() {
     let store: Arc<Store> = Arc::new(Mutex::new(HashMap::<Vec<u8>, Vec<u8>>::new()));
-    let listener = TcpListener::bind("127.0.0.1:6123").unwrap();
+    let listener = TcpListener::bind("127.0.0.1:6123").expect("Failed to bind 127.0.0.1:6123");
 
     for stream in listener.incoming() {
+        let stream = match stream {
+            Ok(s) => s,
+            Err(e) => {eprintln!("accept failed {}", e); continue},
+        };
         let kv_store = Arc::clone(&store);
         thread::spawn(|| {
-            handle_client(stream.unwrap(), kv_store);
+            handle_client(stream, kv_store);
         });
     }
 }
@@ -58,7 +67,7 @@ fn handle_client(mut stream: TcpStream, kv_store: Arc<Store>) {
             match try_parse_request(&buffer) {
                 Ok(Parsed::Complete(elements, consumed)) => {
                     let response: Vec<u8> = dispatch(&elements, &kv_store).into();
-                    stream.write_all(&response).unwrap();
+                    if stream.write_all(&response).is_err() { return; } // The client disconnected
                     buffer.drain(..consumed);
                 }
                 Ok(Parsed::Incomplete) => break,
@@ -97,6 +106,7 @@ fn try_parse_request(buf: &[u8]) -> Result<Parsed, ProtocolError>  {
 
     let crlf = match find_crlf(&buf[pos..]) {
         Some(idx) => idx,
+        None if buf.len() - pos > MAX_INLINE_LEN => return Err(ProtocolError::Malformed),
         None => return Ok(Parsed::Incomplete)
     };
 
@@ -125,6 +135,7 @@ fn try_parse_request(buf: &[u8]) -> Result<Parsed, ProtocolError>  {
 
         let crlf = match find_crlf(&buf[pos..]) {
             Some(idx) => idx,
+            None if buf.len() - pos > MAX_INLINE_LEN => return Err(ProtocolError::Malformed),
             None => return Ok(Parsed::Incomplete)
         };
 
@@ -266,14 +277,14 @@ impl From<Reply> for Vec<u8> {
         }
     }
 }
-
+// TODO: swap both of these From<_> for String impls for Display + std::error::Error
 impl From<RequestError> for String {
     fn from(value: RequestError) -> Self {
         match value {
             RequestError::Missing => String::from("ERR missing argument(s)"),
             RequestError::InvalidUtf8 => String::from("ERR invalid data"),
-            RequestError::UnknownCommand(msg) => format!("ERR unknown command \'{}\'", msg.replace(['\r', '\n'], " ")),
-            RequestError::InvalidFormat => String::from("ERR invalid request format"),
+            // TODO: drop this replace(), From<Reply> for Vec<u8> already sanitises CRLF on the way out
+            RequestError::UnknownCommand(msg) => format!("ERR unknown command \'{}\'", msg.replace(['\r', '\n'], " "))
         }
     }
 }
