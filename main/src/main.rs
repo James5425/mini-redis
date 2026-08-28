@@ -58,7 +58,10 @@ fn main() {
     }
 }
 
-fn handle_client(mut stream: TcpStream, kv_store: Arc<Store>) {
+fn handle_client<S>(mut stream: S, kv_store: Arc<Store>)
+where
+    S: Read + Write
+{
     let mut buffer: Vec<u8> = Vec::new();
     let mut temp_buff: [u8; 1024] = [0; 1024];
 
