@@ -108,9 +108,16 @@ fn try_parse_request(buf: &[u8]) -> Result<Parsed, ProtocolError>  {
     pos += 1;
 
     let crlf = match find_crlf(&buf[pos..]) {
+        Some(idx) if idx > MAX_INLINE_LEN => return Err(ProtocolError::Malformed),
         Some(idx) => idx,
-        None if buf.len() - pos > MAX_INLINE_LEN => return Err(ProtocolError::Malformed),
-        None => return Ok(Parsed::Incomplete)
+        None => {
+            // A trailing CR may be the first byte of a split CRLF terminator.
+            let header_len = buf.len() - pos - usize::from(buf.last() == Some(&b'\r'));
+            if header_len > MAX_INLINE_LEN {
+                return Err(ProtocolError::Malformed);
+            }
+            return Ok(Parsed::Incomplete);
+        }
     };
 
     let number_of_elements: usize = std::str::from_utf8(&buf[pos..pos + crlf])
@@ -137,9 +144,16 @@ fn try_parse_request(buf: &[u8]) -> Result<Parsed, ProtocolError>  {
         pos += 1;
 
         let crlf = match find_crlf(&buf[pos..]) {
+            Some(idx) if idx > MAX_INLINE_LEN => return Err(ProtocolError::Malformed),
             Some(idx) => idx,
-            None if buf.len() - pos > MAX_INLINE_LEN => return Err(ProtocolError::Malformed),
-            None => return Ok(Parsed::Incomplete)
+            None => {
+                // A trailing CR may be the first byte of a split CRLF terminator.
+                let header_len = buf.len() - pos - usize::from(buf.last() == Some(&b'\r'));
+                if header_len > MAX_INLINE_LEN {
+                    return Err(ProtocolError::Malformed);
+                }
+                return Ok(Parsed::Incomplete);
+            }
         };
 
         let len: usize = std::str::from_utf8(&buf[pos..pos + crlf])
@@ -155,6 +169,11 @@ fn try_parse_request(buf: &[u8]) -> Result<Parsed, ProtocolError>  {
         if buf.len() < pos + len + 2 {
             return Ok(Parsed::Incomplete);
         }
+
+        if &buf[pos + len..pos + len + 2] != b"\r\n" {
+            return Err(ProtocolError::Malformed);
+        }
+
         elements.push(buf[pos..pos + len].to_vec());
         pos += len + 2;
     }
