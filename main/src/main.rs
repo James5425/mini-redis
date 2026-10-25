@@ -661,4 +661,116 @@ use super::*;
     fn find_crlf_doesnt_exist() {
         assert_eq!(find_crlf(b"\r"), None);
     }
+
+    #[test]
+    fn find_crlf_returns_first_instance() {
+        assert_eq!(find_crlf(b"a\r\nb\r\n"), Some(1));
+    }
+
+    #[test]
+    fn find_crlf_byte_order_matters() {
+        assert_eq!(find_crlf(b"\n\r"), None);
+    }
+
+
+    #[test]
+    fn find_crlf_correct_offset() {
+        assert_eq!(find_crlf(b"hello\r\n"), Some(5));
+    }
+
+
+    #[test]
+    fn find_crlf_empty() {
+        assert_eq!(find_crlf(b""), None);
+    }
+
+    #[test]
+    fn set_value_sets_correctly() {
+        let elements: [Vec<u8>; 3] = [&b"SET"[..], b"hello", b"world"]
+            .map(|b| b.to_vec());
+        let store: Store = Mutex::new(HashMap::<Vec<u8>, Vec<u8>>::new());
+
+        assert_eq!(set_value(&elements, &store), Reply::Ok);
+        assert_eq!(store.lock_recover().get("hello".as_bytes()), Some(&b"world".to_vec()));
+    }
+
+    #[test]
+    fn set_value_too_few_params() {
+        let elements: [Vec<u8>; 2] = [&b"SET"[..], b"world"]
+            .map(|b| b.to_vec());
+        let store: Store = Mutex::new(HashMap::<Vec<u8>, Vec<u8>>::new());
+
+        assert_eq!(set_value(&elements, &store), Reply::Error("ERR wrong number of arguments for 'set' command".into()));
+        assert_eq!(store.lock_recover().len(), 0);
+    }
+
+    #[test]
+    fn set_value_too_many_params() {
+        let elements: [Vec<u8>; 4] = [&b"SET"[..], b"hello", b"world", b"1234"]
+            .map(|b| b.to_vec());
+        let store: Store = Mutex::new(HashMap::<Vec<u8>, Vec<u8>>::new());
+
+        assert_eq!(set_value(&elements, &store), Reply::Error("ERR wrong number of arguments for 'set' command".into()));
+        assert_eq!(store.lock_recover().len(), 0);
+    }
+
+    #[test]
+    fn set_value_error_doesnt_touch_store() {
+        let elements: [Vec<u8>; 4] = [&b"SET"[..], b"hello", b"world", b"1234"]
+            .map(|b| b.to_vec());
+        let store: Store = Mutex::new(HashMap::<Vec<u8>, Vec<u8>>::new());
+        store.lock_recover().insert(b"hello".to_vec(), b"test".to_vec());
+
+        assert_eq!(set_value(&elements, &store), Reply::Error("ERR wrong number of arguments for 'set' command".into()));
+        assert_eq!(store.lock_recover().len(), 1);
+        assert_eq!(store.lock_recover().get("hello".as_bytes()), Some(&b"test".to_vec()));
+
+    }
+
+    #[test]
+    fn set_value_overrides_existing_value() {
+        let elements: [Vec<u8>; 3] = [&b"SET"[..], b"hello", b"world"]
+            .map(|b| b.to_vec());
+        
+        let store: Store = Mutex::new(HashMap::<Vec<u8>, Vec<u8>>::new());
+        store.lock_recover().insert(b"hello".to_vec(), b"test".to_vec());
+
+        assert_eq!(set_value(&elements, &store), Reply::Ok);
+        assert_eq!(store.lock_recover().get("hello".as_bytes()), Some(&b"world".to_vec()));
+        assert_eq!(store.lock_recover().len(), 1);
+    }
+
+    #[test]
+    fn set_value_binary_value() {
+        let elements: [Vec<u8>; 3] = [&b"SET"[..], b"\xFF", b"\xFF"]
+            .map(|b| b.to_vec());
+        
+        let store: Store = Mutex::new(HashMap::<Vec<u8>, Vec<u8>>::new());
+
+        assert_eq!(set_value(&elements, &store), Reply::Ok);
+        assert_eq!(store.lock_recover().get(&b"\xFF".to_vec()), Some(&b"\xFF".to_vec()));
+    }
+
+    #[test]
+    fn set_value_empty_value() {
+        let elements: [Vec<u8>; 3] = [&b"SET"[..], b"hello", b""]
+            .map(|b| b.to_vec());
+        
+        let store: Store = Mutex::new(HashMap::<Vec<u8>, Vec<u8>>::new());
+
+        assert_eq!(set_value(&elements, &store), Reply::Ok);
+        assert_eq!(store.lock_recover().get(&b"hello".to_vec()), Some(&b"".to_vec()));
+    }
+
+
+    #[test]
+    fn set_value_empty_key() {
+        let elements: [Vec<u8>; 3] = [&b"SET"[..], b"", b"world"]
+            .map(|b| b.to_vec());
+        
+        let store: Store = Mutex::new(HashMap::<Vec<u8>, Vec<u8>>::new());
+
+        assert_eq!(set_value(&elements, &store), Reply::Ok);
+        assert_eq!(store.lock_recover().get(&b"".to_vec()), Some(&b"world".to_vec()));
+    }
 }
