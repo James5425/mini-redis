@@ -651,4 +651,14 @@ use super::*;
             assert_eq!(try_parse_request(&buf), Err(ProtocolError::Malformed), "terminator: {terminator:?}");
         }
     }
+
+    #[test]
+    fn find_crlf_exists() {
+        assert_eq!(find_crlf(b"\r\n"), Some(0));
+    }
+
+    #[test]
+    fn find_crlf_doesnt_exist() {
+        assert_eq!(find_crlf(b"\r"), None);
+    }
 }
