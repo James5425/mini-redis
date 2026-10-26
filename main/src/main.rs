@@ -942,4 +942,382 @@ use super::*;
         assert_eq!(delete_item(&elements, &store), Reply::Int(1));
         assert_eq!(store.lock_recover().len(), 0);
     }
+
+    #[test]
+    fn parse_action_supported_commands() {
+        assert_eq!(parse_action(b"SET"), Ok(Action::Set));
+        assert_eq!(parse_action(b"GET"), Ok(Action::Get));
+        assert_eq!(parse_action(b"DEL"), Ok(Action::Del));
+    }
+
+    #[test]
+    fn parse_action_mixed_case() {
+        assert_eq!(parse_action(b"sEt"), Ok(Action::Set));
+        assert_eq!(parse_action(b"gEt"), Ok(Action::Get));
+        assert_eq!(parse_action(b"dEl"), Ok(Action::Del));
+    }
+
+    #[test]
+    fn parse_action_unknown_command() {
+        assert_eq!(parse_action(b"PING"), Err(RequestError::UnknownCommand("PING".into())));
+    }
+
+    #[test]
+    fn parse_action_empty_command() {
+        assert_eq!(parse_action(b""), Err(RequestError::UnknownCommand("".into())));
+    }
+
+    #[test]
+    fn parse_action_invalid_utf8() {
+        assert_eq!(parse_action(b"\xFF"), Err(RequestError::InvalidUtf8));
+    }
+
+    #[test]
+    fn request_type_missing_command() {
+        assert_eq!(request_type(&[]), Err(RequestError::Missing));
+    }
+
+    #[test]
+    fn dispatch_routes_commands() {
+        let store: Store = Mutex::new(HashMap::<Vec<u8>, Vec<u8>>::new());
+        let set_elements: [Vec<u8>; 3] = [&b"sEt"[..], b"hello", b"world"]
+            .map(|b| b.to_vec());
+        let get_elements: [Vec<u8>; 2] = [&b"gEt"[..], b"hello"]
+            .map(|b| b.to_vec());
+        let del_elements: [Vec<u8>; 2] = [&b"dEl"[..], b"hello"]
+            .map(|b| b.to_vec());
+
+        assert_eq!(dispatch(&set_elements, &store), Reply::Ok);
+        assert_eq!(store.lock_recover().get(b"hello".as_slice()), Some(&b"world".to_vec()));
+        assert_eq!(dispatch(&get_elements, &store), Reply::Bulk(b"world".to_vec()));
+        assert_eq!(dispatch(&del_elements, &store), Reply::Int(1));
+        assert_eq!(dispatch(&get_elements, &store), Reply::Nil);
+        assert_eq!(store.lock_recover().len(), 0);
+    }
+
+    #[test]
+    fn dispatch_invalid_commands_dont_touch_store() {
+        let store: Store = Mutex::new(HashMap::<Vec<u8>, Vec<u8>>::new());
+        store.lock_recover().insert(b"hello".to_vec(), b"world".to_vec());
+
+        assert_eq!(dispatch(&[], &store), Reply::Error("ERR missing argument(s)".into()));
+        assert_eq!(dispatch(&[b"".to_vec()], &store), Reply::Error("ERR unknown command ''".into()));
+        assert_eq!(dispatch(&[b"PING".to_vec()], &store), Reply::Error("ERR unknown command 'PING'".into()));
+        assert_eq!(dispatch(&[b"\xFF".to_vec()], &store), Reply::Error("ERR invalid data".into()));
+        assert_eq!(store.lock_recover().len(), 1);
+        assert_eq!(store.lock_recover().get(b"hello".as_slice()), Some(&b"world".to_vec()));
+    }
+
+    #[test]
+    fn reply_ok_encodes_correctly() {
+        assert_eq!(Vec::from(Reply::Ok), b"+OK\r\n".to_vec());
+    }
+
+    #[test]
+    fn reply_bulk_encodes_correctly() {
+        assert_eq!(Vec::from(Reply::Bulk(b"hello".to_vec())), b"$5\r\nhello\r\n".to_vec());
+    }
+
+    #[test]
+    fn reply_bulk_empty() {
+        assert_eq!(Vec::from(Reply::Bulk(vec![])), b"$0\r\n\r\n".to_vec());
+    }
+
+    #[test]
+    fn reply_bulk_binary() {
+        assert_eq!(Vec::from(Reply::Bulk(b"\xFF\x00\r\n".to_vec())), b"$4\r\n\xFF\x00\r\n\r\n".to_vec());
+    }
+
+    #[test]
+    fn reply_bulk_unicode_uses_byte_length() {
+        assert_eq!(Vec::from(Reply::Bulk("é".as_bytes().to_vec())), b"$2\r\n\xC3\xA9\r\n".to_vec());
+    }
+
+    #[test]
+    fn reply_nil_encodes_correctly() {
+        assert_eq!(Vec::from(Reply::Nil), b"$-1\r\n".to_vec());
+    }
+
+    #[test]
+    fn reply_int_encodes_correctly() {
+        assert_eq!(Vec::from(Reply::Int(0)), b":0\r\n".to_vec());
+        assert_eq!(Vec::from(Reply::Int(12)), b":12\r\n".to_vec());
+        assert_eq!(Vec::from(Reply::Int(-1)), b":-1\r\n".to_vec());
+        assert_eq!(Vec::from(Reply::Int(i64::MIN)), b":-9223372036854775808\r\n".to_vec());
+        assert_eq!(Vec::from(Reply::Int(i64::MAX)), b":9223372036854775807\r\n".to_vec());
+    }
+
+    #[test]
+    fn reply_error_encodes_correctly() {
+        assert_eq!(Vec::from(Reply::Error("ERR test".into())), b"-ERR test\r\n".to_vec());
+        assert_eq!(Vec::from(Reply::Error("".into())), b"-\r\n".to_vec());
+    }
+
+    #[test]
+    fn reply_error_sanitises_crlf() {
+        assert_eq!(Vec::from(Reply::Error("ERR a\rb\nc\r\nd".into())), b"-ERR a b c  d\r\n".to_vec());
+    }
+
+    #[test]
+    fn reply_error_length_boundaries() {
+        for length in [MAX_ERR_LEN - 1, MAX_ERR_LEN, MAX_ERR_LEN + 1] {
+            let response = Vec::from(Reply::Error("x".repeat(length)));
+            let expected = format!("-{}\r\n", "x".repeat(length.min(MAX_ERR_LEN))).into_bytes();
+
+            assert_eq!(response, expected);
+        }
+    }
+
+    #[test]
+    fn reply_error_truncates_at_utf8_boundary() {
+        let message = format!("{}éz", "x".repeat(MAX_ERR_LEN - 1));
+        let expected = format!("-{}\r\n", "x".repeat(MAX_ERR_LEN - 1)).into_bytes();
+
+        assert_eq!(Vec::from(Reply::Error(message)), expected);
+    }
+
+    #[derive(Default)]
+    struct TestStream {
+        chunks: std::collections::VecDeque<Vec<u8>>,
+        output: Vec<u8>,
+        read_calls: usize,
+        write_calls: usize,
+        read_error: bool,
+        write_error: bool,
+        max_write: Option<usize>,
+    }
+
+    impl TestStream {
+        fn new(chunks: &[&[u8]]) -> Self {
+            Self {
+                chunks: chunks.iter().map(|chunk| chunk.to_vec()).collect(),
+                ..Self::default()
+            }
+        }
+    }
+
+    impl Read for TestStream {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            self.read_calls += 1;
+            if let Some(chunk) = self.chunks.front_mut() {
+                let count = chunk.len().min(buf.len());
+                buf[..count].copy_from_slice(&chunk[..count]);
+                chunk.drain(..count);
+                if chunk.is_empty() {
+                    self.chunks.pop_front();
+                }
+                return Ok(count);
+            }
+            if self.read_error {
+                return Err(std::io::ErrorKind::ConnectionReset.into());
+            }
+            Ok(0)
+        }
+    }
+
+    impl Write for TestStream {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.write_calls += 1;
+            if self.write_error {
+                return Err(std::io::ErrorKind::BrokenPipe.into());
+            }
+            let count = self.max_write.unwrap_or(buf.len()).min(buf.len());
+            self.output.extend_from_slice(&buf[..count]);
+            Ok(count)
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn handle_client_complete_request() {
+        let mut stream = TestStream::new(&[b"*3\r\n$3\r\nSET\r\n$5\r\nhello\r\n$5\r\nworld\r\n"]);
+        let store: Arc<Store> = Arc::new(Mutex::new(HashMap::<Vec<u8>, Vec<u8>>::new()));
+
+        handle_client(&mut stream, Arc::clone(&store));
+
+        assert_eq!(stream.output, b"+OK\r\n".to_vec());
+        assert_eq!(store.lock_recover().get(b"hello".as_slice()), Some(&b"world".to_vec()));
+    }
+
+    #[test]
+    fn handle_client_fragmented_request() {
+        let mut stream = TestStream::new(&[b"*2\r", b"\n$3\r\nGET\r\n$5\r\nhe", b"llo\r\n"]);
+        let store: Arc<Store> = Arc::new(Mutex::new(HashMap::<Vec<u8>, Vec<u8>>::new()));
+        store.lock_recover().insert(b"hello".to_vec(), b"world".to_vec());
+
+        handle_client(&mut stream, Arc::clone(&store));
+
+        assert_eq!(stream.output, b"$5\r\nworld\r\n".to_vec());
+        assert_eq!(stream.read_calls, 4);
+    }
+
+    #[test]
+    fn handle_client_multiple_requests() {
+        let mut stream = TestStream::new(&[b"*3\r\n$3\r\nSET\r\n$5\r\nhello\r\n$5\r\nworld\r\n*2\r\n$3\r\nGET\r\n$5\r\nhello\r\n*2\r\n$3\r\nDEL\r\n$5\r\nhello\r\n"]);
+        let store: Arc<Store> = Arc::new(Mutex::new(HashMap::<Vec<u8>, Vec<u8>>::new()));
+
+        handle_client(&mut stream, Arc::clone(&store));
+
+        assert_eq!(stream.output, b"+OK\r\n$5\r\nworld\r\n:1\r\n".to_vec());
+        assert_eq!(store.lock_recover().len(), 0);
+        assert_eq!(stream.read_calls, 2);
+    }
+
+    #[test]
+    fn handle_client_complete_then_partial_request() {
+        let mut stream = TestStream::new(&[
+            b"*3\r\n$3\r\nSET\r\n$5\r\nhello\r\n$5\r\nworld\r\n*2\r\n$3\r\nGET\r\n$5\r\nhe",
+            b"llo\r\n",
+        ]);
+        let store: Arc<Store> = Arc::new(Mutex::new(HashMap::<Vec<u8>, Vec<u8>>::new()));
+
+        handle_client(&mut stream, Arc::clone(&store));
+
+        assert_eq!(stream.output, b"+OK\r\n$5\r\nworld\r\n".to_vec());
+        assert_eq!(store.lock_recover().get(b"hello".as_slice()), Some(&b"world".to_vec()));
+        assert_eq!(stream.read_calls, 3);
+    }
+
+    #[test]
+    fn handle_client_protocol_error_stops_processing() {
+        let mut stream = TestStream::new(&[b"?", b"*3\r\n$3\r\nSET\r\n$5\r\nhello\r\n$5\r\nworld\r\n"]);
+        let store: Arc<Store> = Arc::new(Mutex::new(HashMap::<Vec<u8>, Vec<u8>>::new()));
+
+        handle_client(&mut stream, Arc::clone(&store));
+
+        assert_eq!(stream.output, b"-ERR Protocol error: malformed request.\r\n".to_vec());
+        assert_eq!(stream.read_calls, 1);
+        assert_eq!(store.lock_recover().len(), 0);
+    }
+
+    #[test]
+    fn handle_client_bad_length() {
+        let mut stream = TestStream::new(&[b"*a\r\n"]);
+        let store: Arc<Store> = Arc::new(Mutex::new(HashMap::<Vec<u8>, Vec<u8>>::new()));
+
+        handle_client(&mut stream, store);
+
+        assert_eq!(stream.output, b"-ERR Protocol error: invalid bulk length.\r\n".to_vec());
+        assert_eq!(stream.read_calls, 1);
+    }
+
+    #[test]
+    fn handle_client_command_error_continues_processing() {
+        let mut stream = TestStream::new(&[b"*1\r\n$4\r\nPING\r\n*2\r\n$3\r\nGET\r\n$5\r\nhello\r\n"]);
+        let store: Arc<Store> = Arc::new(Mutex::new(HashMap::<Vec<u8>, Vec<u8>>::new()));
+
+        handle_client(&mut stream, store);
+
+        assert_eq!(stream.output, b"-ERR unknown command 'PING'\r\n$-1\r\n".to_vec());
+    }
+
+    #[test]
+    fn handle_client_eof_with_partial_request() {
+        let mut stream = TestStream::new(&[b"*3\r\n$3\r\nSET\r\n$5\r\nhello\r\n$5\r\nwor"]);
+        let store: Arc<Store> = Arc::new(Mutex::new(HashMap::<Vec<u8>, Vec<u8>>::new()));
+
+        handle_client(&mut stream, Arc::clone(&store));
+
+        assert_eq!(stream.output, vec![]);
+        assert_eq!(stream.read_calls, 2);
+        assert_eq!(store.lock_recover().len(), 0);
+    }
+
+    #[test]
+    fn handle_client_empty_eof() {
+        let mut stream = TestStream::default();
+        let store: Arc<Store> = Arc::new(Mutex::new(HashMap::<Vec<u8>, Vec<u8>>::new()));
+
+        handle_client(&mut stream, store);
+
+        assert_eq!(stream.output, vec![]);
+        assert_eq!(stream.read_calls, 1);
+    }
+
+    #[test]
+    fn handle_client_read_error() {
+        let mut stream = TestStream::new(&[b"*3\r\n$3\r\nSET\r\n$5\r\nhello\r\n$5\r\nwor"]);
+        stream.read_error = true;
+        let store: Arc<Store> = Arc::new(Mutex::new(HashMap::<Vec<u8>, Vec<u8>>::new()));
+
+        handle_client(&mut stream, Arc::clone(&store));
+
+        assert_eq!(stream.output, vec![]);
+        assert_eq!(stream.read_calls, 2);
+        assert_eq!(store.lock_recover().len(), 0);
+    }
+
+    #[test]
+    fn handle_client_write_error_stops_processing() {
+        let mut stream = TestStream::new(&[b"*3\r\n$3\r\nSET\r\n$5\r\nhello\r\n$5\r\nworld\r\n*2\r\n$3\r\nDEL\r\n$5\r\nhello\r\n"]);
+        stream.write_error = true;
+        let store: Arc<Store> = Arc::new(Mutex::new(HashMap::<Vec<u8>, Vec<u8>>::new()));
+
+        handle_client(&mut stream, Arc::clone(&store));
+
+        assert_eq!(stream.output, vec![]);
+        assert_eq!(stream.write_calls, 1);
+        assert_eq!(stream.read_calls, 1);
+        assert_eq!(store.lock_recover().get(b"hello".as_slice()), Some(&b"world".to_vec()));
+    }
+
+    #[test]
+    fn handle_client_short_writes() {
+        let mut stream = TestStream::new(&[b"*2\r\n$3\r\nGET\r\n$5\r\nhello\r\n"]);
+        stream.max_write = Some(2);
+        let store: Arc<Store> = Arc::new(Mutex::new(HashMap::<Vec<u8>, Vec<u8>>::new()));
+        store.lock_recover().insert(b"hello".to_vec(), b"world".to_vec());
+
+        handle_client(&mut stream, store);
+
+        assert_eq!(stream.output, b"$5\r\nworld\r\n".to_vec());
+        assert_eq!(stream.write_calls, 6);
+    }
+
+    #[test]
+    fn handle_client_zero_write_stops_processing() {
+        let mut stream = TestStream::new(&[b"*2\r\n$3\r\nGET\r\n$5\r\nhello\r\n"]);
+        stream.max_write = Some(0);
+        let store: Arc<Store> = Arc::new(Mutex::new(HashMap::<Vec<u8>, Vec<u8>>::new()));
+
+        handle_client(&mut stream, store);
+
+        assert_eq!(stream.output, vec![]);
+        assert_eq!(stream.write_calls, 1);
+        assert_eq!(stream.read_calls, 1);
+    }
+
+    #[test]
+    fn handle_client_protocol_error_write_failure() {
+        let mut stream = TestStream::new(&[b"?"]);
+        stream.write_error = true;
+        let store: Arc<Store> = Arc::new(Mutex::new(HashMap::<Vec<u8>, Vec<u8>>::new()));
+
+        handle_client(&mut stream, store);
+
+        assert_eq!(stream.output, vec![]);
+        assert_eq!(stream.write_calls, 1);
+        assert_eq!(stream.read_calls, 1);
+    }
+
+    #[test]
+    fn lock_recover_clears_poison_and_preserves_data() {
+        let store: Arc<Store> = Arc::new(Mutex::new(HashMap::<Vec<u8>, Vec<u8>>::new()));
+        let thread_store = Arc::clone(&store);
+        let result = thread::spawn(move || {
+            let mut data = thread_store.lock().unwrap();
+            data.insert(b"hello".to_vec(), b"world".to_vec());
+            panic!("poison store");
+        }).join();
+
+        assert!(result.is_err());
+        assert!(store.is_poisoned());
+        assert_eq!(store.lock_recover().get(b"hello".as_slice()), Some(&b"world".to_vec()));
+        assert!(!store.is_poisoned());
+        store.lock_recover().insert(b"other".to_vec(), b"test".to_vec());
+        assert_eq!(store.lock().unwrap().get(b"other".as_slice()), Some(&b"test".to_vec()));
+    }
 }
