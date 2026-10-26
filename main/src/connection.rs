@@ -3,6 +3,8 @@ use std::{
     sync::Arc,
 };
 
+use log::{debug, warn};
+
 use crate::{
     protocol::{Parsed, Reply, try_parse_request},
     store::{Store, dispatch},
@@ -20,23 +22,36 @@ where
             match try_parse_request(&buffer) {
                 Ok(Parsed::Complete(elements, consumed)) => {
                     let response: Vec<u8> = dispatch(&elements, &kv_store).into();
-                    if stream.write_all(&response).is_err() {
+                    if let Err(e) = stream.write_all(&response) {
+                        warn!("Failed to write response: {e}");
                         return;
-                    } // The client disconnected
+                    }
                     buffer.drain(..consumed);
                 }
                 Ok(Parsed::Incomplete) => break,
                 Err(e) => {
-                    let _ = stream.write_all(&Vec::from(Reply::Error(e.into())));
+                    warn!("Closing connection after protocol error: {e:?}");
+                    if let Err(e) = stream.write_all(&Vec::from(Reply::Error(e.into()))) {
+                        debug!("Failed to write protocol error response: {e}");
+                    }
                     return;
                 }
             }
         }
 
         match stream.read(&mut temp_buff) {
-            Ok(0) => return,
+            Ok(0) => {
+                debug!(
+                    "Client closed connection; {} buffered bytes discarded",
+                    buffer.len()
+                );
+                return;
+            }
             Ok(n) => buffer.extend_from_slice(&temp_buff[..n]),
-            Err(_) => return,
+            Err(e) => {
+                warn!("Failed to read request: {e}");
+                return;
+            }
         }
     }
 }

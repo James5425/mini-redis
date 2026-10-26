@@ -3,6 +3,8 @@ use std::{
     sync::{Mutex, MutexGuard},
 };
 
+use log::warn;
+
 use crate::protocol::{Action, Reply, request_type};
 
 pub(crate) type Store = Mutex<HashMap<Vec<u8>, Vec<u8>>>;
@@ -72,7 +74,7 @@ where
 {
     fn lock_recover(&self) -> MutexGuard<'_, T> {
         self.lock().unwrap_or_else(|e| {
-            eprintln!("WARN: store mutex was poisoned by a panicking thread; recovering");
+            warn!("Store mutex was poisoned by a panicking thread; recovering");
             self.clear_poison();
             e.into_inner()
         })
