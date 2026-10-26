@@ -1,4 +1,10 @@
-use std::{collections::HashMap, io::{Read, Write}, net::{TcpListener}, sync::{Arc, Mutex, MutexGuard}, thread};
+use std::{
+    collections::HashMap,
+    io::{Read, Write},
+    net::TcpListener,
+    sync::{Arc, Mutex, MutexGuard},
+    thread,
+};
 
 #[derive(Debug, PartialEq)]
 enum Reply {
@@ -6,33 +12,33 @@ enum Reply {
     Bulk(Vec<u8>),
     Nil,
     Int(i64),
-    Error(String)
+    Error(String),
 }
 
 #[derive(Debug, PartialEq)]
 enum Action {
     Set,
     Del,
-    Get
+    Get,
 }
 
 #[derive(Debug, PartialEq)]
 enum RequestError {
     Missing,
     InvalidUtf8,
-    UnknownCommand(String)
+    UnknownCommand(String),
 }
 
 #[derive(Debug, PartialEq)]
 enum Parsed {
     Complete(Vec<Vec<u8>>, usize),
-    Incomplete
+    Incomplete,
 }
 
 #[derive(Debug, PartialEq)]
 enum ProtocolError {
     Malformed,
-    BadLength
+    BadLength,
 }
 
 type Store = Mutex<HashMap<Vec<u8>, Vec<u8>>>;
@@ -49,7 +55,10 @@ fn main() {
     for stream in listener.incoming() {
         let stream = match stream {
             Ok(s) => s,
-            Err(e) => {eprintln!("accept failed {}", e); continue},
+            Err(e) => {
+                eprintln!("accept failed {}", e);
+                continue;
+            }
         };
         let kv_store = Arc::clone(&store);
         thread::spawn(|| {
@@ -60,17 +69,19 @@ fn main() {
 
 fn handle_client<S>(mut stream: S, kv_store: Arc<Store>)
 where
-    S: Read + Write
+    S: Read + Write,
 {
     let mut buffer: Vec<u8> = Vec::new();
     let mut temp_buff: [u8; 1024] = [0; 1024];
 
     loop {
-        loop {    
+        loop {
             match try_parse_request(&buffer) {
                 Ok(Parsed::Complete(elements, consumed)) => {
                     let response: Vec<u8> = dispatch(&elements, &kv_store).into();
-                    if stream.write_all(&response).is_err() { return; } // The client disconnected
+                    if stream.write_all(&response).is_err() {
+                        return;
+                    } // The client disconnected
                     buffer.drain(..consumed);
                 }
                 Ok(Parsed::Incomplete) => break,
@@ -83,12 +94,11 @@ where
 
         match stream.read(&mut temp_buff) {
             Ok(0) => return,
-            Ok(n)  => buffer.extend_from_slice(&temp_buff[..n]),
-            Err(_) => return
+            Ok(n) => buffer.extend_from_slice(&temp_buff[..n]),
+            Err(_) => return,
         }
     }
 }
-
 
 /// Returns the index from the START of the provided buf to the end of a redis request segment denoted by \r\n
 fn find_crlf(buf: &[u8]) -> Option<usize> {
@@ -96,7 +106,7 @@ fn find_crlf(buf: &[u8]) -> Option<usize> {
 }
 
 /// Tries to parse a redis style request, returns ProtocolError on malformed input or Parsed enum.
-fn try_parse_request(buf: &[u8]) -> Result<Parsed, ProtocolError>  {
+fn try_parse_request(buf: &[u8]) -> Result<Parsed, ProtocolError> {
     let mut pos = 0;
 
     match buf.first() {
@@ -184,15 +194,9 @@ fn try_parse_request(buf: &[u8]) -> Result<Parsed, ProtocolError>  {
 fn dispatch(elements: &[Vec<u8>], kv_store: &Store) -> Reply {
     match request_type(elements) {
         Ok(action) => match action {
-            Action::Set => {
-                set_value(elements, kv_store)
-            },
-            Action::Del => {
-                delete_item(elements, kv_store)
-            },
-            Action::Get => {
-                get_item(elements, kv_store)
-            },
+            Action::Set => set_value(elements, kv_store),
+            Action::Del => delete_item(elements, kv_store),
+            Action::Get => get_item(elements, kv_store),
         },
         Err(err) => Reply::Error(err.into()),
     }
@@ -214,7 +218,7 @@ fn set_value(elements: &[Vec<u8>], kv_store: &Store) -> Reply {
 fn delete_item(elements: &[Vec<u8>], kv_store: &Store) -> Reply {
     let keys = match elements {
         [_, keys @ ..] if !keys.is_empty() => keys,
-        _ => return Reply::Error("ERR wrong number of arguments for 'del' command".into())
+        _ => return Reply::Error("ERR wrong number of arguments for 'del' command".into()),
     };
 
     let mut data = kv_store.lock_recover();
@@ -224,7 +228,7 @@ fn delete_item(elements: &[Vec<u8>], kv_store: &Store) -> Reply {
     Reply::Int(count as i64)
 }
 
-/// Get the value of key. If the key does not exist, nil is returned. An error is returned if the value stored 
+/// Get the value of key. If the key does not exist, nil is returned. An error is returned if the value stored
 /// at key is not a string, because GET only handles string values.
 fn get_item(elements: &[Vec<u8>], kv_store: &Store) -> Reply {
     let [_, key] = elements else {
@@ -241,14 +245,14 @@ fn get_item(elements: &[Vec<u8>], kv_store: &Store) -> Reply {
 
 trait LockRecover<T>
 where
-    T: ?Sized
+    T: ?Sized,
 {
     fn lock_recover(&self) -> MutexGuard<'_, T>;
 }
 
-impl<T> LockRecover<T> for Mutex<T> 
+impl<T> LockRecover<T> for Mutex<T>
 where
-    T: ?Sized
+    T: ?Sized,
 {
     fn lock_recover(&self) -> MutexGuard<'_, T> {
         self.lock().unwrap_or_else(|e| {
@@ -258,7 +262,6 @@ where
         })
     }
 }
-
 
 fn request_type(elements: &[Vec<u8>]) -> Result<Action, RequestError> {
     let first = elements.first().ok_or(RequestError::Missing)?;
@@ -284,12 +287,13 @@ impl From<Reply> for Vec<u8> {
                 out.extend_from_slice(&data);
                 out.extend(b"\r\n");
                 out
-            },
+            }
             Reply::Nil => b"$-1\r\n".to_vec(),
             Reply::Int(n) => format!(":{}\r\n", n).into_bytes(),
             Reply::Error(mut msg) => {
                 if msg.len() > MAX_ERR_LEN {
-                    let end = (0..=MAX_ERR_LEN).rev()
+                    let end = (0..=MAX_ERR_LEN)
+                        .rev()
                         .find(|&i| msg.is_char_boundary(i))
                         .unwrap_or(0);
                     msg.truncate(end);
@@ -306,7 +310,9 @@ impl From<RequestError> for String {
             RequestError::Missing => String::from("ERR missing argument(s)"),
             RequestError::InvalidUtf8 => String::from("ERR invalid data"),
             // TODO: drop this replace(), From<Reply> for Vec<u8> already sanitises CRLF on the way out
-            RequestError::UnknownCommand(msg) => format!("ERR unknown command \'{}\'", msg.replace(['\r', '\n'], " "))
+            RequestError::UnknownCommand(msg) => {
+                format!("ERR unknown command \'{}\'", msg.replace(['\r', '\n'], " "))
+            }
         }
     }
 }
@@ -324,34 +330,37 @@ impl From<ProtocolError> for String {
 mod tests {
     use std::{iter, vec};
 
-use super::*;
+    use super::*;
 
     #[test]
     fn try_parse_request_complete_request() {
         let buf = b"*1\r\n$5\r\nhello\r\n".to_vec();
         let result = vec![b"hello".to_vec()];
-        
-        assert_eq!(try_parse_request(&buf), Ok(Parsed::Complete(result, buf.len())));
+
+        assert_eq!(
+            try_parse_request(&buf),
+            Ok(Parsed::Complete(result, buf.len()))
+        );
     }
 
     #[test]
     fn try_parse_request_partial_request_missing_end_crlf() {
         let buf = b"*1\r\n$5\r\nhello\r".to_vec();
-        
+
         assert_eq!(try_parse_request(&buf), Ok(Parsed::Incomplete));
     }
 
     #[test]
     fn try_parse_request_checks_first_byte_is_asterisk() {
         let buf = b"1\r\n$5\r\nhello\r".to_vec();
-        
+
         assert_eq!(try_parse_request(&buf), Err(ProtocolError::Malformed));
     }
 
     #[test]
     fn try_parse_request_checks_first_byte_exists() {
         let buf = b"".to_vec();
-        
+
         assert_eq!(try_parse_request(&buf), Ok(Parsed::Incomplete));
     }
 
@@ -360,14 +369,14 @@ use super::*;
         let mut buf = b"*".to_vec();
         let size = MAX_INLINE_LEN + 1;
         buf.extend(iter::repeat(b'0').take(size));
-        
+
         assert_eq!(try_parse_request(&buf), Err(ProtocolError::Malformed));
     }
 
     #[test]
     fn try_parse_request_checks_missing_crlf() {
         let buf = b"*".to_vec();
-        
+
         assert_eq!(try_parse_request(&buf), Ok(Parsed::Incomplete));
     }
 
@@ -375,7 +384,10 @@ use super::*;
     fn try_parse_request_takes_no_items() {
         let buf = b"*0\r\n".to_vec();
 
-        assert_eq!(try_parse_request(&buf), Ok(Parsed::Complete(vec!(), buf.len())));
+        assert_eq!(
+            try_parse_request(&buf),
+            Ok(Parsed::Complete(vec!(), buf.len()))
+        );
     }
 
     #[test]
@@ -384,7 +396,6 @@ use super::*;
 
         assert_eq!(try_parse_request(&buf), Err(ProtocolError::Malformed));
     }
-
 
     #[test]
     fn try_parse_request_overflow_usize() {
@@ -407,7 +418,6 @@ use super::*;
         assert_eq!(try_parse_request(&buf), Ok(Parsed::Incomplete));
     }
 
-
     #[test]
     fn try_parse_request_over_marker_malformed() {
         let buf = b"*1\r\n?".to_vec();
@@ -427,7 +437,7 @@ use super::*;
         let mut buf = b"*1\r\n$".to_vec();
         let size = MAX_INLINE_LEN + 1;
         buf.extend(iter::repeat(b'0').take(size));
-        
+
         assert_eq!(try_parse_request(&buf), Err(ProtocolError::Malformed));
     }
 
@@ -456,15 +466,18 @@ use super::*;
     fn try_parse_request_multiple_bulk_strings() {
         let buf = b"*2\r\n$5\r\nhello\r\n$5\r\nworld\r\n".to_vec();
         let result = vec![b"hello".to_vec(), b"world".to_vec()];
-        
-        assert_eq!(try_parse_request(&buf), Ok(Parsed::Complete(result, buf.len())));
+
+        assert_eq!(
+            try_parse_request(&buf),
+            Ok(Parsed::Complete(result, buf.len()))
+        );
     }
 
     #[test]
     fn try_parse_request_multiple_requests_return_one() {
         let buf = b"*1\r\n$5\r\nhello\r\n*1\r\n$5\r\nworld\r\n".to_vec();
         let result = vec![b"hello".to_vec()];
-        
+
         assert_eq!(try_parse_request(&buf), Ok(Parsed::Complete(result, 15)));
     }
 
@@ -472,78 +485,82 @@ use super::*;
     fn try_parse_request_multiple_with_second_partial_requests_return_first() {
         let buf = b"*1\r\n$5\r\nhello\r\n*1\r".to_vec();
         let result = vec![b"hello".to_vec()];
-        
+
         assert_eq!(try_parse_request(&buf), Ok(Parsed::Complete(result, 15)));
     }
 
     #[test]
     fn try_parse_request_bulk_zero_length() {
         let buf = b"*1\r\n$0\r\n\r\n".to_vec();
-        
-        assert_eq!(try_parse_request(&buf), Ok(Parsed::Complete(vec![vec![]], 10)));
+
+        assert_eq!(
+            try_parse_request(&buf),
+            Ok(Parsed::Complete(vec![vec![]], 10))
+        );
     }
 
     #[test]
     fn try_parse_request_invalid_payload_terminator() {
         let buf = b"*1\r\n$5\r\nhelloXX\r\n".to_vec();
-        
+
         assert_eq!(try_parse_request(&buf), Err(ProtocolError::Malformed));
     }
 
     #[test]
     fn try_parse_request_invalid_length_letter() {
         let buf = b"*a\r\n$5\r\nhello\r\n".to_vec();
-        
+
         assert_eq!(try_parse_request(&buf), Err(ProtocolError::BadLength));
     }
-
 
     #[test]
     fn try_parse_request_invalid_length_negative_number() {
         let buf = b"*-1\r\n$5\r\nhello\r\n".to_vec();
-        
+
         assert_eq!(try_parse_request(&buf), Err(ProtocolError::BadLength));
     }
 
     #[test]
     fn try_parse_request_invalid_body_length_letter() {
         let buf = b"*1\r\n$a\r\nhello\r\n".to_vec();
-        
+
         assert_eq!(try_parse_request(&buf), Err(ProtocolError::BadLength));
     }
-
 
     #[test]
     fn try_parse_request_bulk_length_invalid_utf8() {
         let buf = b"*1\r\n$\xFF\r\nhello\r\n".to_vec();
-        
+
         assert_eq!(try_parse_request(&buf), Err(ProtocolError::Malformed));
     }
-
 
     #[test]
     fn try_parse_request_invalid_body_length_negative_number() {
         let buf = b"*1\r\n$-1\r\nhello\r\n".to_vec();
-        
+
         assert_eq!(try_parse_request(&buf), Err(ProtocolError::BadLength));
     }
 
-    
     #[test]
     fn try_parse_request_payload_contains_crlf() {
         let buf = b"*1\r\n$2\r\n\r\n\r\n".to_vec();
         let result = vec![b"\r\n".to_vec()];
 
-        assert_eq!(try_parse_request(&buf), Ok(Parsed::Complete(result, buf.len())));
+        assert_eq!(
+            try_parse_request(&buf),
+            Ok(Parsed::Complete(result, buf.len()))
+        );
     }
-
 
     #[test]
     fn try_parse_request_payload_contains_nul() {
         let buf = b"*1\r\n$1\r\n\x00\r\n".to_vec();
         let result = vec![b"\x00".to_vec()];
 
-        assert_eq!(try_parse_request(&buf), Ok(Parsed::Complete(result, buf.len())));
+        assert_eq!(
+            try_parse_request(&buf),
+            Ok(Parsed::Complete(result, buf.len()))
+        );
     }
 
     #[test]
@@ -551,7 +568,10 @@ use super::*;
         let buf = b"*1\r\n$5\r\nhell\xFF\r\n".to_vec();
         let result = vec![b"hell\xFF".to_vec()];
 
-        assert_eq!(try_parse_request(&buf), Ok(Parsed::Complete(result, buf.len())));
+        assert_eq!(
+            try_parse_request(&buf),
+            Ok(Parsed::Complete(result, buf.len()))
+        );
     }
 
     #[test]
@@ -572,7 +592,10 @@ use super::*;
         buf.extend_from_slice(b"\r\n");
         assert_eq!(try_parse_request(&buf), Ok(Parsed::Incomplete));
         buf.extend_from_slice(b"\r\n");
-        assert_eq!(try_parse_request(&buf), Ok(Parsed::Complete(vec![vec![]], buf.len())));
+        assert_eq!(
+            try_parse_request(&buf),
+            Ok(Parsed::Complete(vec![vec![]], buf.len()))
+        );
     }
 
     #[test]
@@ -591,7 +614,10 @@ use super::*;
 
         assert_eq!(try_parse_request(&buf), Ok(Parsed::Incomplete));
         buf.extend_from_slice(b"\r\n");
-        assert_eq!(try_parse_request(&buf), Ok(Parsed::Complete(vec![], buf.len())));
+        assert_eq!(
+            try_parse_request(&buf),
+            Ok(Parsed::Complete(vec![], buf.len()))
+        );
     }
 
     #[test]
@@ -601,7 +627,11 @@ use super::*;
             buf.extend(iter::repeat(b'0').take(MAX_INLINE_LEN));
             buf.push(b'\r');
 
-            assert_eq!(try_parse_request(&buf), Ok(Parsed::Incomplete), "header prefix: {prefix:?}");
+            assert_eq!(
+                try_parse_request(&buf),
+                Ok(Parsed::Incomplete),
+                "header prefix: {prefix:?}"
+            );
         }
     }
 
@@ -629,11 +659,19 @@ use super::*;
         let buf = b"*2\r\n$5\r\nhello\r\n$5\r\nworld\r\n";
 
         for end in 0..buf.len() {
-            assert_eq!(try_parse_request(&buf[..end]), Ok(Parsed::Incomplete), "prefix length: {end}");
+            assert_eq!(
+                try_parse_request(&buf[..end]),
+                Ok(Parsed::Incomplete),
+                "prefix length: {end}"
+            );
         }
-        assert_eq!(try_parse_request(buf), Ok(Parsed::Complete(
-            vec![b"hello".to_vec(), b"world".to_vec()], buf.len()
-        )));
+        assert_eq!(
+            try_parse_request(buf),
+            Ok(Parsed::Complete(
+                vec![b"hello".to_vec(), b"world".to_vec()],
+                buf.len()
+            ))
+        );
     }
 
     #[test]
@@ -648,7 +686,11 @@ use super::*;
         for terminator in [b"X\n", b"\rX"] {
             let mut buf = b"*1\r\n$5\r\nhello".to_vec();
             buf.extend_from_slice(terminator);
-            assert_eq!(try_parse_request(&buf), Err(ProtocolError::Malformed), "terminator: {terminator:?}");
+            assert_eq!(
+                try_parse_request(&buf),
+                Err(ProtocolError::Malformed),
+                "terminator: {terminator:?}"
+            );
         }
     }
 
@@ -672,12 +714,10 @@ use super::*;
         assert_eq!(find_crlf(b"\n\r"), None);
     }
 
-
     #[test]
     fn find_crlf_correct_offset() {
         assert_eq!(find_crlf(b"hello\r\n"), Some(5));
     }
-
 
     #[test]
     fn find_crlf_empty() {
@@ -686,154 +726,202 @@ use super::*;
 
     #[test]
     fn set_value_sets_correctly() {
-        let elements: [Vec<u8>; 3] = [&b"SET"[..], b"hello", b"world"]
-            .map(|b| b.to_vec());
+        let elements: [Vec<u8>; 3] = [&b"SET"[..], b"hello", b"world"].map(|b| b.to_vec());
         let store: Store = Mutex::new(HashMap::<Vec<u8>, Vec<u8>>::new());
 
         assert_eq!(set_value(&elements, &store), Reply::Ok);
-        assert_eq!(store.lock_recover().get("hello".as_bytes()), Some(&b"world".to_vec()));
+        assert_eq!(
+            store.lock_recover().get("hello".as_bytes()),
+            Some(&b"world".to_vec())
+        );
     }
 
     #[test]
     fn set_value_too_few_params() {
-        let elements: [Vec<u8>; 2] = [&b"SET"[..], b"world"]
-            .map(|b| b.to_vec());
+        let elements: [Vec<u8>; 2] = [&b"SET"[..], b"world"].map(|b| b.to_vec());
         let store: Store = Mutex::new(HashMap::<Vec<u8>, Vec<u8>>::new());
 
-        assert_eq!(set_value(&elements, &store), Reply::Error("ERR wrong number of arguments for 'set' command".into()));
+        assert_eq!(
+            set_value(&elements, &store),
+            Reply::Error("ERR wrong number of arguments for 'set' command".into())
+        );
         assert_eq!(store.lock_recover().len(), 0);
     }
 
     #[test]
     fn set_value_too_many_params() {
-        let elements: [Vec<u8>; 4] = [&b"SET"[..], b"hello", b"world", b"1234"]
-            .map(|b| b.to_vec());
+        let elements: [Vec<u8>; 4] = [&b"SET"[..], b"hello", b"world", b"1234"].map(|b| b.to_vec());
         let store: Store = Mutex::new(HashMap::<Vec<u8>, Vec<u8>>::new());
 
-        assert_eq!(set_value(&elements, &store), Reply::Error("ERR wrong number of arguments for 'set' command".into()));
+        assert_eq!(
+            set_value(&elements, &store),
+            Reply::Error("ERR wrong number of arguments for 'set' command".into())
+        );
         assert_eq!(store.lock_recover().len(), 0);
     }
 
     #[test]
     fn set_value_error_doesnt_touch_store() {
-        let elements: [Vec<u8>; 4] = [&b"SET"[..], b"hello", b"world", b"1234"]
-            .map(|b| b.to_vec());
+        let elements: [Vec<u8>; 4] = [&b"SET"[..], b"hello", b"world", b"1234"].map(|b| b.to_vec());
         let store: Store = Mutex::new(HashMap::<Vec<u8>, Vec<u8>>::new());
-        store.lock_recover().insert(b"hello".to_vec(), b"test".to_vec());
+        store
+            .lock_recover()
+            .insert(b"hello".to_vec(), b"test".to_vec());
 
-        assert_eq!(set_value(&elements, &store), Reply::Error("ERR wrong number of arguments for 'set' command".into()));
+        assert_eq!(
+            set_value(&elements, &store),
+            Reply::Error("ERR wrong number of arguments for 'set' command".into())
+        );
         assert_eq!(store.lock_recover().len(), 1);
-        assert_eq!(store.lock_recover().get("hello".as_bytes()), Some(&b"test".to_vec()));
-
+        assert_eq!(
+            store.lock_recover().get("hello".as_bytes()),
+            Some(&b"test".to_vec())
+        );
     }
 
     #[test]
     fn set_value_overrides_existing_value() {
-        let elements: [Vec<u8>; 3] = [&b"SET"[..], b"hello", b"world"]
-            .map(|b| b.to_vec());
-        
+        let elements: [Vec<u8>; 3] = [&b"SET"[..], b"hello", b"world"].map(|b| b.to_vec());
+
         let store: Store = Mutex::new(HashMap::<Vec<u8>, Vec<u8>>::new());
-        store.lock_recover().insert(b"hello".to_vec(), b"test".to_vec());
+        store
+            .lock_recover()
+            .insert(b"hello".to_vec(), b"test".to_vec());
 
         assert_eq!(set_value(&elements, &store), Reply::Ok);
-        assert_eq!(store.lock_recover().get("hello".as_bytes()), Some(&b"world".to_vec()));
+        assert_eq!(
+            store.lock_recover().get("hello".as_bytes()),
+            Some(&b"world".to_vec())
+        );
         assert_eq!(store.lock_recover().len(), 1);
     }
 
     #[test]
     fn set_value_binary_value() {
-        let elements: [Vec<u8>; 3] = [&b"SET"[..], b"\xFF", b"\xFF"]
-            .map(|b| b.to_vec());
-        
+        let elements: [Vec<u8>; 3] = [&b"SET"[..], b"\xFF", b"\xFF"].map(|b| b.to_vec());
+
         let store: Store = Mutex::new(HashMap::<Vec<u8>, Vec<u8>>::new());
 
         assert_eq!(set_value(&elements, &store), Reply::Ok);
-        assert_eq!(store.lock_recover().get(&b"\xFF".to_vec()), Some(&b"\xFF".to_vec()));
+        assert_eq!(
+            store.lock_recover().get(&b"\xFF".to_vec()),
+            Some(&b"\xFF".to_vec())
+        );
     }
 
     #[test]
     fn set_value_empty_value() {
-        let elements: [Vec<u8>; 3] = [&b"SET"[..], b"hello", b""]
-            .map(|b| b.to_vec());
-        
+        let elements: [Vec<u8>; 3] = [&b"SET"[..], b"hello", b""].map(|b| b.to_vec());
+
         let store: Store = Mutex::new(HashMap::<Vec<u8>, Vec<u8>>::new());
 
         assert_eq!(set_value(&elements, &store), Reply::Ok);
-        assert_eq!(store.lock_recover().get(&b"hello".to_vec()), Some(&b"".to_vec()));
+        assert_eq!(
+            store.lock_recover().get(&b"hello".to_vec()),
+            Some(&b"".to_vec())
+        );
     }
 
     #[test]
     fn set_value_empty_key() {
-        let elements: [Vec<u8>; 3] = [&b"SET"[..], b"", b"world"]
-            .map(|b| b.to_vec());
-        
+        let elements: [Vec<u8>; 3] = [&b"SET"[..], b"", b"world"].map(|b| b.to_vec());
+
         let store: Store = Mutex::new(HashMap::<Vec<u8>, Vec<u8>>::new());
 
         assert_eq!(set_value(&elements, &store), Reply::Ok);
-        assert_eq!(store.lock_recover().get(&b"".to_vec()), Some(&b"world".to_vec()));
+        assert_eq!(
+            store.lock_recover().get(&b"".to_vec()),
+            Some(&b"world".to_vec())
+        );
     }
 
     #[test]
     fn get_item_gets_correctly() {
-        let elements: [Vec<u8>; 2] = [&b"GET"[..], b"hello"]
-            .map(|b| b.to_vec());
+        let elements: [Vec<u8>; 2] = [&b"GET"[..], b"hello"].map(|b| b.to_vec());
         let store: Store = Mutex::new(HashMap::<Vec<u8>, Vec<u8>>::new());
-        store.lock_recover().insert(b"hello".to_vec(), b"world".to_vec());
+        store
+            .lock_recover()
+            .insert(b"hello".to_vec(), b"world".to_vec());
 
         assert_eq!(get_item(&elements, &store), Reply::Bulk(b"world".to_vec()));
         assert_eq!(store.lock_recover().len(), 1);
-        assert_eq!(store.lock_recover().get(b"hello".as_slice()), Some(&b"world".to_vec()));
+        assert_eq!(
+            store.lock_recover().get(b"hello".as_slice()),
+            Some(&b"world".to_vec())
+        );
     }
 
     #[test]
     fn get_item_missing_key() {
-        let elements: [Vec<u8>; 2] = [&b"GET"[..], b"missing"]
-            .map(|b| b.to_vec());
+        let elements: [Vec<u8>; 2] = [&b"GET"[..], b"missing"].map(|b| b.to_vec());
         let store: Store = Mutex::new(HashMap::<Vec<u8>, Vec<u8>>::new());
-        store.lock_recover().insert(b"hello".to_vec(), b"world".to_vec());
+        store
+            .lock_recover()
+            .insert(b"hello".to_vec(), b"world".to_vec());
 
         assert_eq!(get_item(&elements, &store), Reply::Nil);
         assert_eq!(store.lock_recover().len(), 1);
-        assert_eq!(store.lock_recover().get(b"hello".as_slice()), Some(&b"world".to_vec()));
+        assert_eq!(
+            store.lock_recover().get(b"hello".as_slice()),
+            Some(&b"world".to_vec())
+        );
     }
 
     #[test]
     fn get_item_too_few_params() {
         let elements: [Vec<u8>; 1] = [b"GET".to_vec()];
         let store: Store = Mutex::new(HashMap::<Vec<u8>, Vec<u8>>::new());
-        store.lock_recover().insert(b"hello".to_vec(), b"world".to_vec());
+        store
+            .lock_recover()
+            .insert(b"hello".to_vec(), b"world".to_vec());
 
-        assert_eq!(get_item(&elements, &store), Reply::Error("ERR wrong number of arguments for 'get' command".into()));
+        assert_eq!(
+            get_item(&elements, &store),
+            Reply::Error("ERR wrong number of arguments for 'get' command".into())
+        );
         assert_eq!(store.lock_recover().len(), 1);
-        assert_eq!(store.lock_recover().get(b"hello".as_slice()), Some(&b"world".to_vec()));
+        assert_eq!(
+            store.lock_recover().get(b"hello".as_slice()),
+            Some(&b"world".to_vec())
+        );
     }
 
     #[test]
     fn get_item_too_many_params() {
-        let elements: [Vec<u8>; 3] = [&b"GET"[..], b"hello", b"extra"]
-            .map(|b| b.to_vec());
+        let elements: [Vec<u8>; 3] = [&b"GET"[..], b"hello", b"extra"].map(|b| b.to_vec());
         let store: Store = Mutex::new(HashMap::<Vec<u8>, Vec<u8>>::new());
-        store.lock_recover().insert(b"hello".to_vec(), b"world".to_vec());
+        store
+            .lock_recover()
+            .insert(b"hello".to_vec(), b"world".to_vec());
 
-        assert_eq!(get_item(&elements, &store), Reply::Error("ERR wrong number of arguments for 'get' command".into()));
+        assert_eq!(
+            get_item(&elements, &store),
+            Reply::Error("ERR wrong number of arguments for 'get' command".into())
+        );
         assert_eq!(store.lock_recover().len(), 1);
-        assert_eq!(store.lock_recover().get(b"hello".as_slice()), Some(&b"world".to_vec()));
+        assert_eq!(
+            store.lock_recover().get(b"hello".as_slice()),
+            Some(&b"world".to_vec())
+        );
     }
 
     #[test]
     fn get_item_binary_key_and_value() {
-        let elements: [Vec<u8>; 2] = [&b"GET"[..], b"\xFF\x00\r\n"]
-            .map(|b| b.to_vec());
+        let elements: [Vec<u8>; 2] = [&b"GET"[..], b"\xFF\x00\r\n"].map(|b| b.to_vec());
         let store: Store = Mutex::new(HashMap::<Vec<u8>, Vec<u8>>::new());
-        store.lock_recover().insert(b"\xFF\x00\r\n".to_vec(), b"\x00\xFF\r\n".to_vec());
+        store
+            .lock_recover()
+            .insert(b"\xFF\x00\r\n".to_vec(), b"\x00\xFF\r\n".to_vec());
 
-        assert_eq!(get_item(&elements, &store), Reply::Bulk(b"\x00\xFF\r\n".to_vec()));
+        assert_eq!(
+            get_item(&elements, &store),
+            Reply::Bulk(b"\x00\xFF\r\n".to_vec())
+        );
     }
 
     #[test]
     fn get_item_empty_value() {
-        let elements: [Vec<u8>; 2] = [&b"GET"[..], b"hello"]
-            .map(|b| b.to_vec());
+        let elements: [Vec<u8>; 2] = [&b"GET"[..], b"hello"].map(|b| b.to_vec());
         let store: Store = Mutex::new(HashMap::<Vec<u8>, Vec<u8>>::new());
         store.lock_recover().insert(b"hello".to_vec(), b"".to_vec());
 
@@ -842,8 +930,7 @@ use super::*;
 
     #[test]
     fn get_item_empty_key() {
-        let elements: [Vec<u8>; 2] = [&b"GET"[..], b""]
-            .map(|b| b.to_vec());
+        let elements: [Vec<u8>; 2] = [&b"GET"[..], b""].map(|b| b.to_vec());
         let store: Store = Mutex::new(HashMap::<Vec<u8>, Vec<u8>>::new());
         store.lock_recover().insert(b"".to_vec(), b"world".to_vec());
 
@@ -852,37 +939,50 @@ use super::*;
 
     #[test]
     fn delete_item_deletes_correctly() {
-        let elements: [Vec<u8>; 2] = [&b"DEL"[..], b"hello"]
-            .map(|b| b.to_vec());
+        let elements: [Vec<u8>; 2] = [&b"DEL"[..], b"hello"].map(|b| b.to_vec());
         let store: Store = Mutex::new(HashMap::<Vec<u8>, Vec<u8>>::new());
-        store.lock_recover().insert(b"hello".to_vec(), b"world".to_vec());
-        store.lock_recover().insert(b"other".to_vec(), b"test".to_vec());
+        store
+            .lock_recover()
+            .insert(b"hello".to_vec(), b"world".to_vec());
+        store
+            .lock_recover()
+            .insert(b"other".to_vec(), b"test".to_vec());
 
         assert_eq!(delete_item(&elements, &store), Reply::Int(1));
         assert_eq!(store.lock_recover().get(b"hello".as_slice()), None);
         assert_eq!(store.lock_recover().len(), 1);
-        assert_eq!(store.lock_recover().get(b"other".as_slice()), Some(&b"test".to_vec()));
+        assert_eq!(
+            store.lock_recover().get(b"other".as_slice()),
+            Some(&b"test".to_vec())
+        );
     }
 
     #[test]
     fn delete_item_missing_key() {
-        let elements: [Vec<u8>; 2] = [&b"DEL"[..], b"missing"]
-            .map(|b| b.to_vec());
+        let elements: [Vec<u8>; 2] = [&b"DEL"[..], b"missing"].map(|b| b.to_vec());
         let store: Store = Mutex::new(HashMap::<Vec<u8>, Vec<u8>>::new());
-        store.lock_recover().insert(b"hello".to_vec(), b"world".to_vec());
+        store
+            .lock_recover()
+            .insert(b"hello".to_vec(), b"world".to_vec());
 
         assert_eq!(delete_item(&elements, &store), Reply::Int(0));
         assert_eq!(store.lock_recover().len(), 1);
-        assert_eq!(store.lock_recover().get(b"hello".as_slice()), Some(&b"world".to_vec()));
+        assert_eq!(
+            store.lock_recover().get(b"hello".as_slice()),
+            Some(&b"world".to_vec())
+        );
     }
 
     #[test]
     fn delete_item_multiple_keys() {
-        let elements: [Vec<u8>; 3] = [&b"DEL"[..], b"hello", b"other"]
-            .map(|b| b.to_vec());
+        let elements: [Vec<u8>; 3] = [&b"DEL"[..], b"hello", b"other"].map(|b| b.to_vec());
         let store: Store = Mutex::new(HashMap::<Vec<u8>, Vec<u8>>::new());
-        store.lock_recover().insert(b"hello".to_vec(), b"world".to_vec());
-        store.lock_recover().insert(b"other".to_vec(), b"test".to_vec());
+        store
+            .lock_recover()
+            .insert(b"hello".to_vec(), b"world".to_vec());
+        store
+            .lock_recover()
+            .insert(b"other".to_vec(), b"test".to_vec());
 
         assert_eq!(delete_item(&elements, &store), Reply::Int(2));
         assert_eq!(store.lock_recover().len(), 0);
@@ -890,10 +990,11 @@ use super::*;
 
     #[test]
     fn delete_item_existing_and_missing_keys() {
-        let elements: [Vec<u8>; 3] = [&b"DEL"[..], b"missing", b"hello"]
-            .map(|b| b.to_vec());
+        let elements: [Vec<u8>; 3] = [&b"DEL"[..], b"missing", b"hello"].map(|b| b.to_vec());
         let store: Store = Mutex::new(HashMap::<Vec<u8>, Vec<u8>>::new());
-        store.lock_recover().insert(b"hello".to_vec(), b"world".to_vec());
+        store
+            .lock_recover()
+            .insert(b"hello".to_vec(), b"world".to_vec());
 
         assert_eq!(delete_item(&elements, &store), Reply::Int(1));
         assert_eq!(store.lock_recover().len(), 0);
@@ -901,10 +1002,11 @@ use super::*;
 
     #[test]
     fn delete_item_duplicate_keys() {
-        let elements: [Vec<u8>; 3] = [&b"DEL"[..], b"hello", b"hello"]
-            .map(|b| b.to_vec());
+        let elements: [Vec<u8>; 3] = [&b"DEL"[..], b"hello", b"hello"].map(|b| b.to_vec());
         let store: Store = Mutex::new(HashMap::<Vec<u8>, Vec<u8>>::new());
-        store.lock_recover().insert(b"hello".to_vec(), b"world".to_vec());
+        store
+            .lock_recover()
+            .insert(b"hello".to_vec(), b"world".to_vec());
 
         assert_eq!(delete_item(&elements, &store), Reply::Int(1));
         assert_eq!(store.lock_recover().len(), 0);
@@ -914,19 +1016,28 @@ use super::*;
     fn delete_item_too_few_params() {
         let elements: [Vec<u8>; 1] = [b"DEL".to_vec()];
         let store: Store = Mutex::new(HashMap::<Vec<u8>, Vec<u8>>::new());
-        store.lock_recover().insert(b"hello".to_vec(), b"world".to_vec());
+        store
+            .lock_recover()
+            .insert(b"hello".to_vec(), b"world".to_vec());
 
-        assert_eq!(delete_item(&elements, &store), Reply::Error("ERR wrong number of arguments for 'del' command".into()));
+        assert_eq!(
+            delete_item(&elements, &store),
+            Reply::Error("ERR wrong number of arguments for 'del' command".into())
+        );
         assert_eq!(store.lock_recover().len(), 1);
-        assert_eq!(store.lock_recover().get(b"hello".as_slice()), Some(&b"world".to_vec()));
+        assert_eq!(
+            store.lock_recover().get(b"hello".as_slice()),
+            Some(&b"world".to_vec())
+        );
     }
 
     #[test]
     fn delete_item_binary_key() {
-        let elements: [Vec<u8>; 2] = [&b"DEL"[..], b"\xFF\x00\r\n"]
-            .map(|b| b.to_vec());
+        let elements: [Vec<u8>; 2] = [&b"DEL"[..], b"\xFF\x00\r\n"].map(|b| b.to_vec());
         let store: Store = Mutex::new(HashMap::<Vec<u8>, Vec<u8>>::new());
-        store.lock_recover().insert(b"\xFF\x00\r\n".to_vec(), b"world".to_vec());
+        store
+            .lock_recover()
+            .insert(b"\xFF\x00\r\n".to_vec(), b"world".to_vec());
 
         assert_eq!(delete_item(&elements, &store), Reply::Int(1));
         assert_eq!(store.lock_recover().len(), 0);
@@ -934,8 +1045,7 @@ use super::*;
 
     #[test]
     fn delete_item_empty_key() {
-        let elements: [Vec<u8>; 2] = [&b"DEL"[..], b""]
-            .map(|b| b.to_vec());
+        let elements: [Vec<u8>; 2] = [&b"DEL"[..], b""].map(|b| b.to_vec());
         let store: Store = Mutex::new(HashMap::<Vec<u8>, Vec<u8>>::new());
         store.lock_recover().insert(b"".to_vec(), b"".to_vec());
 
@@ -959,12 +1069,18 @@ use super::*;
 
     #[test]
     fn parse_action_unknown_command() {
-        assert_eq!(parse_action(b"PING"), Err(RequestError::UnknownCommand("PING".into())));
+        assert_eq!(
+            parse_action(b"PING"),
+            Err(RequestError::UnknownCommand("PING".into()))
+        );
     }
 
     #[test]
     fn parse_action_empty_command() {
-        assert_eq!(parse_action(b""), Err(RequestError::UnknownCommand("".into())));
+        assert_eq!(
+            parse_action(b""),
+            Err(RequestError::UnknownCommand("".into()))
+        );
     }
 
     #[test]
@@ -980,16 +1096,19 @@ use super::*;
     #[test]
     fn dispatch_routes_commands() {
         let store: Store = Mutex::new(HashMap::<Vec<u8>, Vec<u8>>::new());
-        let set_elements: [Vec<u8>; 3] = [&b"sEt"[..], b"hello", b"world"]
-            .map(|b| b.to_vec());
-        let get_elements: [Vec<u8>; 2] = [&b"gEt"[..], b"hello"]
-            .map(|b| b.to_vec());
-        let del_elements: [Vec<u8>; 2] = [&b"dEl"[..], b"hello"]
-            .map(|b| b.to_vec());
+        let set_elements: [Vec<u8>; 3] = [&b"sEt"[..], b"hello", b"world"].map(|b| b.to_vec());
+        let get_elements: [Vec<u8>; 2] = [&b"gEt"[..], b"hello"].map(|b| b.to_vec());
+        let del_elements: [Vec<u8>; 2] = [&b"dEl"[..], b"hello"].map(|b| b.to_vec());
 
         assert_eq!(dispatch(&set_elements, &store), Reply::Ok);
-        assert_eq!(store.lock_recover().get(b"hello".as_slice()), Some(&b"world".to_vec()));
-        assert_eq!(dispatch(&get_elements, &store), Reply::Bulk(b"world".to_vec()));
+        assert_eq!(
+            store.lock_recover().get(b"hello".as_slice()),
+            Some(&b"world".to_vec())
+        );
+        assert_eq!(
+            dispatch(&get_elements, &store),
+            Reply::Bulk(b"world".to_vec())
+        );
         assert_eq!(dispatch(&del_elements, &store), Reply::Int(1));
         assert_eq!(dispatch(&get_elements, &store), Reply::Nil);
         assert_eq!(store.lock_recover().len(), 0);
@@ -998,14 +1117,31 @@ use super::*;
     #[test]
     fn dispatch_invalid_commands_dont_touch_store() {
         let store: Store = Mutex::new(HashMap::<Vec<u8>, Vec<u8>>::new());
-        store.lock_recover().insert(b"hello".to_vec(), b"world".to_vec());
+        store
+            .lock_recover()
+            .insert(b"hello".to_vec(), b"world".to_vec());
 
-        assert_eq!(dispatch(&[], &store), Reply::Error("ERR missing argument(s)".into()));
-        assert_eq!(dispatch(&[b"".to_vec()], &store), Reply::Error("ERR unknown command ''".into()));
-        assert_eq!(dispatch(&[b"PING".to_vec()], &store), Reply::Error("ERR unknown command 'PING'".into()));
-        assert_eq!(dispatch(&[b"\xFF".to_vec()], &store), Reply::Error("ERR invalid data".into()));
+        assert_eq!(
+            dispatch(&[], &store),
+            Reply::Error("ERR missing argument(s)".into())
+        );
+        assert_eq!(
+            dispatch(&[b"".to_vec()], &store),
+            Reply::Error("ERR unknown command ''".into())
+        );
+        assert_eq!(
+            dispatch(&[b"PING".to_vec()], &store),
+            Reply::Error("ERR unknown command 'PING'".into())
+        );
+        assert_eq!(
+            dispatch(&[b"\xFF".to_vec()], &store),
+            Reply::Error("ERR invalid data".into())
+        );
         assert_eq!(store.lock_recover().len(), 1);
-        assert_eq!(store.lock_recover().get(b"hello".as_slice()), Some(&b"world".to_vec()));
+        assert_eq!(
+            store.lock_recover().get(b"hello".as_slice()),
+            Some(&b"world".to_vec())
+        );
     }
 
     #[test]
@@ -1015,7 +1151,10 @@ use super::*;
 
     #[test]
     fn reply_bulk_encodes_correctly() {
-        assert_eq!(Vec::from(Reply::Bulk(b"hello".to_vec())), b"$5\r\nhello\r\n".to_vec());
+        assert_eq!(
+            Vec::from(Reply::Bulk(b"hello".to_vec())),
+            b"$5\r\nhello\r\n".to_vec()
+        );
     }
 
     #[test]
@@ -1025,12 +1164,18 @@ use super::*;
 
     #[test]
     fn reply_bulk_binary() {
-        assert_eq!(Vec::from(Reply::Bulk(b"\xFF\x00\r\n".to_vec())), b"$4\r\n\xFF\x00\r\n\r\n".to_vec());
+        assert_eq!(
+            Vec::from(Reply::Bulk(b"\xFF\x00\r\n".to_vec())),
+            b"$4\r\n\xFF\x00\r\n\r\n".to_vec()
+        );
     }
 
     #[test]
     fn reply_bulk_unicode_uses_byte_length() {
-        assert_eq!(Vec::from(Reply::Bulk("é".as_bytes().to_vec())), b"$2\r\n\xC3\xA9\r\n".to_vec());
+        assert_eq!(
+            Vec::from(Reply::Bulk("é".as_bytes().to_vec())),
+            b"$2\r\n\xC3\xA9\r\n".to_vec()
+        );
     }
 
     #[test]
@@ -1043,19 +1188,31 @@ use super::*;
         assert_eq!(Vec::from(Reply::Int(0)), b":0\r\n".to_vec());
         assert_eq!(Vec::from(Reply::Int(12)), b":12\r\n".to_vec());
         assert_eq!(Vec::from(Reply::Int(-1)), b":-1\r\n".to_vec());
-        assert_eq!(Vec::from(Reply::Int(i64::MIN)), b":-9223372036854775808\r\n".to_vec());
-        assert_eq!(Vec::from(Reply::Int(i64::MAX)), b":9223372036854775807\r\n".to_vec());
+        assert_eq!(
+            Vec::from(Reply::Int(i64::MIN)),
+            b":-9223372036854775808\r\n".to_vec()
+        );
+        assert_eq!(
+            Vec::from(Reply::Int(i64::MAX)),
+            b":9223372036854775807\r\n".to_vec()
+        );
     }
 
     #[test]
     fn reply_error_encodes_correctly() {
-        assert_eq!(Vec::from(Reply::Error("ERR test".into())), b"-ERR test\r\n".to_vec());
+        assert_eq!(
+            Vec::from(Reply::Error("ERR test".into())),
+            b"-ERR test\r\n".to_vec()
+        );
         assert_eq!(Vec::from(Reply::Error("".into())), b"-\r\n".to_vec());
     }
 
     #[test]
     fn reply_error_sanitises_crlf() {
-        assert_eq!(Vec::from(Reply::Error("ERR a\rb\nc\r\nd".into())), b"-ERR a b c  d\r\n".to_vec());
+        assert_eq!(
+            Vec::from(Reply::Error("ERR a\rb\nc\r\nd".into())),
+            b"-ERR a b c  d\r\n".to_vec()
+        );
     }
 
     #[test]
@@ -1139,14 +1296,19 @@ use super::*;
         handle_client(&mut stream, Arc::clone(&store));
 
         assert_eq!(stream.output, b"+OK\r\n".to_vec());
-        assert_eq!(store.lock_recover().get(b"hello".as_slice()), Some(&b"world".to_vec()));
+        assert_eq!(
+            store.lock_recover().get(b"hello".as_slice()),
+            Some(&b"world".to_vec())
+        );
     }
 
     #[test]
     fn handle_client_fragmented_request() {
         let mut stream = TestStream::new(&[b"*2\r", b"\n$3\r\nGET\r\n$5\r\nhe", b"llo\r\n"]);
         let store: Arc<Store> = Arc::new(Mutex::new(HashMap::<Vec<u8>, Vec<u8>>::new()));
-        store.lock_recover().insert(b"hello".to_vec(), b"world".to_vec());
+        store
+            .lock_recover()
+            .insert(b"hello".to_vec(), b"world".to_vec());
 
         handle_client(&mut stream, Arc::clone(&store));
 
@@ -1177,18 +1339,25 @@ use super::*;
         handle_client(&mut stream, Arc::clone(&store));
 
         assert_eq!(stream.output, b"+OK\r\n$5\r\nworld\r\n".to_vec());
-        assert_eq!(store.lock_recover().get(b"hello".as_slice()), Some(&b"world".to_vec()));
+        assert_eq!(
+            store.lock_recover().get(b"hello".as_slice()),
+            Some(&b"world".to_vec())
+        );
         assert_eq!(stream.read_calls, 3);
     }
 
     #[test]
     fn handle_client_protocol_error_stops_processing() {
-        let mut stream = TestStream::new(&[b"?", b"*3\r\n$3\r\nSET\r\n$5\r\nhello\r\n$5\r\nworld\r\n"]);
+        let mut stream =
+            TestStream::new(&[b"?", b"*3\r\n$3\r\nSET\r\n$5\r\nhello\r\n$5\r\nworld\r\n"]);
         let store: Arc<Store> = Arc::new(Mutex::new(HashMap::<Vec<u8>, Vec<u8>>::new()));
 
         handle_client(&mut stream, Arc::clone(&store));
 
-        assert_eq!(stream.output, b"-ERR Protocol error: malformed request.\r\n".to_vec());
+        assert_eq!(
+            stream.output,
+            b"-ERR Protocol error: malformed request.\r\n".to_vec()
+        );
         assert_eq!(stream.read_calls, 1);
         assert_eq!(store.lock_recover().len(), 0);
     }
@@ -1200,18 +1369,25 @@ use super::*;
 
         handle_client(&mut stream, store);
 
-        assert_eq!(stream.output, b"-ERR Protocol error: invalid bulk length.\r\n".to_vec());
+        assert_eq!(
+            stream.output,
+            b"-ERR Protocol error: invalid bulk length.\r\n".to_vec()
+        );
         assert_eq!(stream.read_calls, 1);
     }
 
     #[test]
     fn handle_client_command_error_continues_processing() {
-        let mut stream = TestStream::new(&[b"*1\r\n$4\r\nPING\r\n*2\r\n$3\r\nGET\r\n$5\r\nhello\r\n"]);
+        let mut stream =
+            TestStream::new(&[b"*1\r\n$4\r\nPING\r\n*2\r\n$3\r\nGET\r\n$5\r\nhello\r\n"]);
         let store: Arc<Store> = Arc::new(Mutex::new(HashMap::<Vec<u8>, Vec<u8>>::new()));
 
         handle_client(&mut stream, store);
 
-        assert_eq!(stream.output, b"-ERR unknown command 'PING'\r\n$-1\r\n".to_vec());
+        assert_eq!(
+            stream.output,
+            b"-ERR unknown command 'PING'\r\n$-1\r\n".to_vec()
+        );
     }
 
     #[test]
@@ -1252,7 +1428,9 @@ use super::*;
 
     #[test]
     fn handle_client_write_error_stops_processing() {
-        let mut stream = TestStream::new(&[b"*3\r\n$3\r\nSET\r\n$5\r\nhello\r\n$5\r\nworld\r\n*2\r\n$3\r\nDEL\r\n$5\r\nhello\r\n"]);
+        let mut stream = TestStream::new(&[
+            b"*3\r\n$3\r\nSET\r\n$5\r\nhello\r\n$5\r\nworld\r\n*2\r\n$3\r\nDEL\r\n$5\r\nhello\r\n",
+        ]);
         stream.write_error = true;
         let store: Arc<Store> = Arc::new(Mutex::new(HashMap::<Vec<u8>, Vec<u8>>::new()));
 
@@ -1261,7 +1439,10 @@ use super::*;
         assert_eq!(stream.output, vec![]);
         assert_eq!(stream.write_calls, 1);
         assert_eq!(stream.read_calls, 1);
-        assert_eq!(store.lock_recover().get(b"hello".as_slice()), Some(&b"world".to_vec()));
+        assert_eq!(
+            store.lock_recover().get(b"hello".as_slice()),
+            Some(&b"world".to_vec())
+        );
     }
 
     #[test]
@@ -1269,7 +1450,9 @@ use super::*;
         let mut stream = TestStream::new(&[b"*2\r\n$3\r\nGET\r\n$5\r\nhello\r\n"]);
         stream.max_write = Some(2);
         let store: Arc<Store> = Arc::new(Mutex::new(HashMap::<Vec<u8>, Vec<u8>>::new()));
-        store.lock_recover().insert(b"hello".to_vec(), b"world".to_vec());
+        store
+            .lock_recover()
+            .insert(b"hello".to_vec(), b"world".to_vec());
 
         handle_client(&mut stream, store);
 
@@ -1311,13 +1494,22 @@ use super::*;
             let mut data = thread_store.lock().unwrap();
             data.insert(b"hello".to_vec(), b"world".to_vec());
             panic!("poison store");
-        }).join();
+        })
+        .join();
 
         assert!(result.is_err());
         assert!(store.is_poisoned());
-        assert_eq!(store.lock_recover().get(b"hello".as_slice()), Some(&b"world".to_vec()));
+        assert_eq!(
+            store.lock_recover().get(b"hello".as_slice()),
+            Some(&b"world".to_vec())
+        );
         assert!(!store.is_poisoned());
-        store.lock_recover().insert(b"other".to_vec(), b"test".to_vec());
-        assert_eq!(store.lock().unwrap().get(b"other".as_slice()), Some(&b"test".to_vec()));
+        store
+            .lock_recover()
+            .insert(b"other".to_vec(), b"test".to_vec());
+        assert_eq!(
+            store.lock().unwrap().get(b"other".as_slice()),
+            Some(&b"test".to_vec())
+        );
     }
 }
