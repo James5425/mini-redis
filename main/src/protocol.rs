@@ -124,6 +124,11 @@ pub(crate) fn try_parse_request(buf: &[u8]) -> Result<Parsed, ProtocolError> {
     Ok(Parsed::Complete(elements, pos))
 }
 
+/// Returns the index from the START of the provided buf to the end of a redis request segment denoted by \r\n
+fn find_crlf(buf: &[u8]) -> Option<usize> {
+    buf.windows(2).position(|w| w == b"\r\n")
+}
+
 pub(crate) fn request_type(elements: &[Vec<u8>]) -> Result<Action, RequestError> {
     let first = elements.first().ok_or(RequestError::Missing)?;
     parse_action(first)
@@ -137,11 +142,6 @@ fn parse_action(element: &[u8]) -> Result<Action, RequestError> {
         c if c.eq_ignore_ascii_case("get") => Ok(Action::Get),
         other => Err(RequestError::UnknownCommand(other.to_string())),
     }
-}
-
-/// Returns the index from the START of the provided buf to the end of a redis request segment denoted by \r\n
-fn find_crlf(buf: &[u8]) -> Option<usize> {
-    buf.windows(2).position(|w| w == b"\r\n")
 }
 
 impl From<Reply> for Vec<u8> {
@@ -211,40 +211,14 @@ mod tests {
     }
 
     #[test]
-    fn try_parse_request_partial_request_missing_end_crlf() {
-        let buf = b"*1\r\n$5\r\nhello\r".to_vec();
+    fn try_parse_request_multiple_bulk_strings() {
+        let buf = b"*2\r\n$5\r\nhello\r\n$5\r\nworld\r\n".to_vec();
+        let result = vec![b"hello".to_vec(), b"world".to_vec()];
 
-        assert_eq!(try_parse_request(&buf), Ok(Parsed::Incomplete));
-    }
-
-    #[test]
-    fn try_parse_request_checks_first_byte_is_asterisk() {
-        let buf = b"1\r\n$5\r\nhello\r".to_vec();
-
-        assert_eq!(try_parse_request(&buf), Err(ProtocolError::Malformed));
-    }
-
-    #[test]
-    fn try_parse_request_checks_first_byte_exists() {
-        let buf = b"".to_vec();
-
-        assert_eq!(try_parse_request(&buf), Ok(Parsed::Incomplete));
-    }
-
-    #[test]
-    fn try_parse_request_checks_exceeds_max_line_len_by_one() {
-        let mut buf = b"*".to_vec();
-        let size = MAX_INLINE_LEN + 1;
-        buf.extend(iter::repeat(b'0').take(size));
-
-        assert_eq!(try_parse_request(&buf), Err(ProtocolError::Malformed));
-    }
-
-    #[test]
-    fn try_parse_request_checks_missing_crlf() {
-        let buf = b"*".to_vec();
-
-        assert_eq!(try_parse_request(&buf), Ok(Parsed::Incomplete));
+        assert_eq!(
+            try_parse_request(&buf),
+            Ok(Parsed::Complete(result, buf.len()))
+        );
     }
 
     #[test]
@@ -258,105 +232,6 @@ mod tests {
     }
 
     #[test]
-    fn try_parse_request_array_length_invalid_utf8() {
-        let buf = b"*\xFF\r\n".to_vec();
-
-        assert_eq!(try_parse_request(&buf), Err(ProtocolError::Malformed));
-    }
-
-    #[test]
-    fn try_parse_request_overflow_usize() {
-        let buf = format!("*{}0\r\n", usize::MAX).into_bytes();
-
-        assert_eq!(try_parse_request(&buf), Err(ProtocolError::BadLength));
-    }
-
-    #[test]
-    fn try_parse_request_over_max_multibulk() {
-        let buf = format!("*{}\r\n", MAX_MULTIBULK + 1).into_bytes();
-
-        assert_eq!(try_parse_request(&buf), Err(ProtocolError::BadLength));
-    }
-
-    #[test]
-    fn try_parse_request_over_marker_missing() {
-        let buf = b"*1\r\n".to_vec();
-
-        assert_eq!(try_parse_request(&buf), Ok(Parsed::Incomplete));
-    }
-
-    #[test]
-    fn try_parse_request_over_marker_malformed() {
-        let buf = b"*1\r\n?".to_vec();
-
-        assert_eq!(try_parse_request(&buf), Err(ProtocolError::Malformed));
-    }
-
-    #[test]
-    fn try_parse_request_missing_crlf_in_first_element() {
-        let buf = b"*1\r\n$\r".to_vec();
-
-        assert_eq!(try_parse_request(&buf), Ok(Parsed::Incomplete));
-    }
-
-    #[test]
-    fn try_parse_request_checks_first_element_exceeds_max_line_len_by_one() {
-        let mut buf = b"*1\r\n$".to_vec();
-        let size = MAX_INLINE_LEN + 1;
-        buf.extend(iter::repeat(b'0').take(size));
-
-        assert_eq!(try_parse_request(&buf), Err(ProtocolError::Malformed));
-    }
-
-    #[test]
-    fn try_parse_request_first_element_overflow_usize() {
-        let buf = format!("*1\r\n${}0\r\n", usize::MAX).into_bytes();
-
-        assert_eq!(try_parse_request(&buf), Err(ProtocolError::BadLength));
-    }
-
-    #[test]
-    fn try_parse_request_first_element_over_max_bulk_len() {
-        let buf = format!("*1\r\n${}\r\n", MAX_BULK_LEN + 1).into_bytes();
-
-        assert_eq!(try_parse_request(&buf), Err(ProtocolError::BadLength));
-    }
-
-    #[test]
-    fn try_parse_request_first_element_on_max_bulk_len() {
-        let buf = format!("*1\r\n${}\r\n", MAX_BULK_LEN).into_bytes();
-
-        assert_eq!(try_parse_request(&buf), Ok(Parsed::Incomplete));
-    }
-
-    #[test]
-    fn try_parse_request_multiple_bulk_strings() {
-        let buf = b"*2\r\n$5\r\nhello\r\n$5\r\nworld\r\n".to_vec();
-        let result = vec![b"hello".to_vec(), b"world".to_vec()];
-
-        assert_eq!(
-            try_parse_request(&buf),
-            Ok(Parsed::Complete(result, buf.len()))
-        );
-    }
-
-    #[test]
-    fn try_parse_request_multiple_requests_return_one() {
-        let buf = b"*1\r\n$5\r\nhello\r\n*1\r\n$5\r\nworld\r\n".to_vec();
-        let result = vec![b"hello".to_vec()];
-
-        assert_eq!(try_parse_request(&buf), Ok(Parsed::Complete(result, 15)));
-    }
-
-    #[test]
-    fn try_parse_request_multiple_with_second_partial_requests_return_first() {
-        let buf = b"*1\r\n$5\r\nhello\r\n*1\r".to_vec();
-        let result = vec![b"hello".to_vec()];
-
-        assert_eq!(try_parse_request(&buf), Ok(Parsed::Complete(result, 15)));
-    }
-
-    #[test]
     fn try_parse_request_bulk_zero_length() {
         let buf = b"*1\r\n$0\r\n\r\n".to_vec();
 
@@ -364,48 +239,6 @@ mod tests {
             try_parse_request(&buf),
             Ok(Parsed::Complete(vec![vec![]], 10))
         );
-    }
-
-    #[test]
-    fn try_parse_request_invalid_payload_terminator() {
-        let buf = b"*1\r\n$5\r\nhelloXX\r\n".to_vec();
-
-        assert_eq!(try_parse_request(&buf), Err(ProtocolError::Malformed));
-    }
-
-    #[test]
-    fn try_parse_request_invalid_length_letter() {
-        let buf = b"*a\r\n$5\r\nhello\r\n".to_vec();
-
-        assert_eq!(try_parse_request(&buf), Err(ProtocolError::BadLength));
-    }
-
-    #[test]
-    fn try_parse_request_invalid_length_negative_number() {
-        let buf = b"*-1\r\n$5\r\nhello\r\n".to_vec();
-
-        assert_eq!(try_parse_request(&buf), Err(ProtocolError::BadLength));
-    }
-
-    #[test]
-    fn try_parse_request_invalid_body_length_letter() {
-        let buf = b"*1\r\n$a\r\nhello\r\n".to_vec();
-
-        assert_eq!(try_parse_request(&buf), Err(ProtocolError::BadLength));
-    }
-
-    #[test]
-    fn try_parse_request_bulk_length_invalid_utf8() {
-        let buf = b"*1\r\n$\xFF\r\nhello\r\n".to_vec();
-
-        assert_eq!(try_parse_request(&buf), Err(ProtocolError::Malformed));
-    }
-
-    #[test]
-    fn try_parse_request_invalid_body_length_negative_number() {
-        let buf = b"*1\r\n$-1\r\nhello\r\n".to_vec();
-
-        assert_eq!(try_parse_request(&buf), Err(ProtocolError::BadLength));
     }
 
     #[test]
@@ -442,12 +275,195 @@ mod tests {
     }
 
     #[test]
-    fn try_parse_request_bulk_header_over_limit_with_crlf() {
-        let mut buf = b"*1\r\n$".to_vec();
+    fn try_parse_request_multiple_requests_return_one() {
+        let buf = b"*1\r\n$5\r\nhello\r\n*1\r\n$5\r\nworld\r\n".to_vec();
+        let result = vec![b"hello".to_vec()];
+
+        assert_eq!(try_parse_request(&buf), Ok(Parsed::Complete(result, 15)));
+    }
+
+    #[test]
+    fn try_parse_request_multiple_with_second_partial_requests_return_first() {
+        let buf = b"*1\r\n$5\r\nhello\r\n*1\r".to_vec();
+        let result = vec![b"hello".to_vec()];
+
+        assert_eq!(try_parse_request(&buf), Ok(Parsed::Complete(result, 15)));
+    }
+
+    #[test]
+    fn try_parse_request_checks_first_byte_exists() {
+        let buf = b"".to_vec();
+
+        assert_eq!(try_parse_request(&buf), Ok(Parsed::Incomplete));
+    }
+
+    #[test]
+    fn try_parse_request_checks_first_byte_is_asterisk() {
+        let buf = b"1\r\n$5\r\nhello\r".to_vec();
+
+        assert_eq!(try_parse_request(&buf), Err(ProtocolError::Malformed));
+    }
+
+    #[test]
+    fn try_parse_request_checks_missing_crlf() {
+        let buf = b"*".to_vec();
+
+        assert_eq!(try_parse_request(&buf), Ok(Parsed::Incomplete));
+    }
+
+    #[test]
+    fn try_parse_request_empty_array_length() {
+        let buf = b"*\r\n";
+        assert_eq!(try_parse_request(buf), Err(ProtocolError::BadLength));
+    }
+
+    #[test]
+    fn try_parse_request_invalid_length_letter() {
+        let buf = b"*a\r\n$5\r\nhello\r\n".to_vec();
+
+        assert_eq!(try_parse_request(&buf), Err(ProtocolError::BadLength));
+    }
+
+    #[test]
+    fn try_parse_request_invalid_length_negative_number() {
+        let buf = b"*-1\r\n$5\r\nhello\r\n".to_vec();
+
+        assert_eq!(try_parse_request(&buf), Err(ProtocolError::BadLength));
+    }
+
+    #[test]
+    fn try_parse_request_array_length_invalid_utf8() {
+        let buf = b"*\xFF\r\n".to_vec();
+
+        assert_eq!(try_parse_request(&buf), Err(ProtocolError::Malformed));
+    }
+
+    #[test]
+    fn try_parse_request_overflow_usize() {
+        let buf = format!("*{}0\r\n", usize::MAX).into_bytes();
+
+        assert_eq!(try_parse_request(&buf), Err(ProtocolError::BadLength));
+    }
+
+    #[test]
+    fn try_parse_request_array_count_at_limit() {
+        let buf = format!("*{}\r\n", MAX_MULTIBULK).into_bytes();
+
+        assert_eq!(try_parse_request(&buf), Ok(Parsed::Incomplete));
+    }
+
+    #[test]
+    fn try_parse_request_over_max_multibulk() {
+        let buf = format!("*{}\r\n", MAX_MULTIBULK + 1).into_bytes();
+
+        assert_eq!(try_parse_request(&buf), Err(ProtocolError::BadLength));
+    }
+
+    #[test]
+    fn try_parse_request_array_header_at_limit() {
+        let mut buf = b"*".to_vec();
+        buf.extend(iter::repeat(b'0').take(MAX_INLINE_LEN));
+
+        assert_eq!(try_parse_request(&buf), Ok(Parsed::Incomplete));
+        buf.extend_from_slice(b"\r\n");
+        assert_eq!(
+            try_parse_request(&buf),
+            Ok(Parsed::Complete(vec![], buf.len()))
+        );
+    }
+
+    #[test]
+    fn try_parse_request_checks_exceeds_max_line_len_by_one() {
+        let mut buf = b"*".to_vec();
+        let size = MAX_INLINE_LEN + 1;
+        buf.extend(iter::repeat(b'0').take(size));
+
+        assert_eq!(try_parse_request(&buf), Err(ProtocolError::Malformed));
+    }
+
+    #[test]
+    fn try_parse_request_array_header_over_limit_with_crlf() {
+        let mut buf = b"*".to_vec();
         buf.extend(iter::repeat(b'0').take(MAX_INLINE_LEN + 1));
         buf.extend_from_slice(b"\r\n");
 
         assert_eq!(try_parse_request(&buf), Err(ProtocolError::Malformed));
+    }
+
+    #[test]
+    fn try_parse_request_over_marker_missing() {
+        let buf = b"*1\r\n".to_vec();
+
+        assert_eq!(try_parse_request(&buf), Ok(Parsed::Incomplete));
+    }
+
+    #[test]
+    fn try_parse_request_over_marker_malformed() {
+        let buf = b"*1\r\n?".to_vec();
+
+        assert_eq!(try_parse_request(&buf), Err(ProtocolError::Malformed));
+    }
+
+    #[test]
+    fn try_parse_request_invalid_second_element_marker() {
+        let buf = b"*2\r\n$5\r\nhello\r\n?";
+
+        assert_eq!(try_parse_request(buf), Err(ProtocolError::Malformed));
+    }
+
+    #[test]
+    fn try_parse_request_missing_crlf_in_first_element() {
+        let buf = b"*1\r\n$\r".to_vec();
+
+        assert_eq!(try_parse_request(&buf), Ok(Parsed::Incomplete));
+    }
+
+    #[test]
+    fn try_parse_request_empty_bulk_length() {
+        let buf = b"*1\r\n$\r\n";
+        assert_eq!(try_parse_request(buf), Err(ProtocolError::BadLength));
+    }
+
+    #[test]
+    fn try_parse_request_invalid_body_length_letter() {
+        let buf = b"*1\r\n$a\r\nhello\r\n".to_vec();
+
+        assert_eq!(try_parse_request(&buf), Err(ProtocolError::BadLength));
+    }
+
+    #[test]
+    fn try_parse_request_invalid_body_length_negative_number() {
+        let buf = b"*1\r\n$-1\r\nhello\r\n".to_vec();
+
+        assert_eq!(try_parse_request(&buf), Err(ProtocolError::BadLength));
+    }
+
+    #[test]
+    fn try_parse_request_bulk_length_invalid_utf8() {
+        let buf = b"*1\r\n$\xFF\r\nhello\r\n".to_vec();
+
+        assert_eq!(try_parse_request(&buf), Err(ProtocolError::Malformed));
+    }
+
+    #[test]
+    fn try_parse_request_first_element_overflow_usize() {
+        let buf = format!("*1\r\n${}0\r\n", usize::MAX).into_bytes();
+
+        assert_eq!(try_parse_request(&buf), Err(ProtocolError::BadLength));
+    }
+
+    #[test]
+    fn try_parse_request_first_element_on_max_bulk_len() {
+        let buf = format!("*1\r\n${}\r\n", MAX_BULK_LEN).into_bytes();
+
+        assert_eq!(try_parse_request(&buf), Ok(Parsed::Incomplete));
+    }
+
+    #[test]
+    fn try_parse_request_first_element_over_max_bulk_len() {
+        let buf = format!("*1\r\n${}\r\n", MAX_BULK_LEN + 1).into_bytes();
+
+        assert_eq!(try_parse_request(&buf), Err(ProtocolError::BadLength));
     }
 
     #[test]
@@ -466,25 +482,21 @@ mod tests {
     }
 
     #[test]
-    fn try_parse_request_array_header_over_limit_with_crlf() {
-        let mut buf = b"*".to_vec();
-        buf.extend(iter::repeat(b'0').take(MAX_INLINE_LEN + 1));
-        buf.extend_from_slice(b"\r\n");
+    fn try_parse_request_checks_first_element_exceeds_max_line_len_by_one() {
+        let mut buf = b"*1\r\n$".to_vec();
+        let size = MAX_INLINE_LEN + 1;
+        buf.extend(iter::repeat(b'0').take(size));
 
         assert_eq!(try_parse_request(&buf), Err(ProtocolError::Malformed));
     }
 
     #[test]
-    fn try_parse_request_array_header_at_limit() {
-        let mut buf = b"*".to_vec();
-        buf.extend(iter::repeat(b'0').take(MAX_INLINE_LEN));
-
-        assert_eq!(try_parse_request(&buf), Ok(Parsed::Incomplete));
+    fn try_parse_request_bulk_header_over_limit_with_crlf() {
+        let mut buf = b"*1\r\n$".to_vec();
+        buf.extend(iter::repeat(b'0').take(MAX_INLINE_LEN + 1));
         buf.extend_from_slice(b"\r\n");
-        assert_eq!(
-            try_parse_request(&buf),
-            Ok(Parsed::Complete(vec![], buf.len()))
-        );
+
+        assert_eq!(try_parse_request(&buf), Err(ProtocolError::Malformed));
     }
 
     #[test]
@@ -503,22 +515,30 @@ mod tests {
     }
 
     #[test]
-    fn try_parse_request_empty_array_length() {
-        let buf = b"*\r\n";
-        assert_eq!(try_parse_request(buf), Err(ProtocolError::BadLength));
-    }
-
-    #[test]
-    fn try_parse_request_empty_bulk_length() {
-        let buf = b"*1\r\n$\r\n";
-        assert_eq!(try_parse_request(buf), Err(ProtocolError::BadLength));
-    }
-
-    #[test]
-    fn try_parse_request_array_count_at_limit() {
-        let buf = format!("*{}\r\n", MAX_MULTIBULK).into_bytes();
+    fn try_parse_request_partial_request_missing_end_crlf() {
+        let buf = b"*1\r\n$5\r\nhello\r".to_vec();
 
         assert_eq!(try_parse_request(&buf), Ok(Parsed::Incomplete));
+    }
+
+    #[test]
+    fn try_parse_request_invalid_payload_terminator() {
+        let buf = b"*1\r\n$5\r\nhelloXX\r\n".to_vec();
+
+        assert_eq!(try_parse_request(&buf), Err(ProtocolError::Malformed));
+    }
+
+    #[test]
+    fn try_parse_request_checks_each_payload_terminator_byte() {
+        for terminator in [b"X\n", b"\rX"] {
+            let mut buf = b"*1\r\n$5\r\nhello".to_vec();
+            buf.extend_from_slice(terminator);
+            assert_eq!(
+                try_parse_request(&buf),
+                Err(ProtocolError::Malformed),
+                "terminator: {terminator:?}"
+            );
+        }
     }
 
     #[test]
@@ -539,61 +559,6 @@ mod tests {
                 buf.len()
             ))
         );
-    }
-
-    #[test]
-    fn try_parse_request_invalid_second_element_marker() {
-        let buf = b"*2\r\n$5\r\nhello\r\n?";
-
-        assert_eq!(try_parse_request(buf), Err(ProtocolError::Malformed));
-    }
-
-    #[test]
-    fn try_parse_request_checks_each_payload_terminator_byte() {
-        for terminator in [b"X\n", b"\rX"] {
-            let mut buf = b"*1\r\n$5\r\nhello".to_vec();
-            buf.extend_from_slice(terminator);
-            assert_eq!(
-                try_parse_request(&buf),
-                Err(ProtocolError::Malformed),
-                "terminator: {terminator:?}"
-            );
-        }
-    }
-
-    #[test]
-    fn parse_action_supported_commands() {
-        assert_eq!(parse_action(b"SET"), Ok(Action::Set));
-        assert_eq!(parse_action(b"GET"), Ok(Action::Get));
-        assert_eq!(parse_action(b"DEL"), Ok(Action::Del));
-    }
-
-    #[test]
-    fn parse_action_mixed_case() {
-        assert_eq!(parse_action(b"sEt"), Ok(Action::Set));
-        assert_eq!(parse_action(b"gEt"), Ok(Action::Get));
-        assert_eq!(parse_action(b"dEl"), Ok(Action::Del));
-    }
-
-    #[test]
-    fn parse_action_unknown_command() {
-        assert_eq!(
-            parse_action(b"PING"),
-            Err(RequestError::UnknownCommand("PING".into()))
-        );
-    }
-
-    #[test]
-    fn parse_action_empty_command() {
-        assert_eq!(
-            parse_action(b""),
-            Err(RequestError::UnknownCommand("".into()))
-        );
-    }
-
-    #[test]
-    fn parse_action_invalid_utf8() {
-        assert_eq!(parse_action(b"\xFF"), Err(RequestError::InvalidUtf8));
     }
 
     #[test]
@@ -629,6 +594,41 @@ mod tests {
     #[test]
     fn request_type_missing_command() {
         assert_eq!(request_type(&[]), Err(RequestError::Missing));
+    }
+
+    #[test]
+    fn parse_action_supported_commands() {
+        assert_eq!(parse_action(b"SET"), Ok(Action::Set));
+        assert_eq!(parse_action(b"GET"), Ok(Action::Get));
+        assert_eq!(parse_action(b"DEL"), Ok(Action::Del));
+    }
+
+    #[test]
+    fn parse_action_mixed_case() {
+        assert_eq!(parse_action(b"sEt"), Ok(Action::Set));
+        assert_eq!(parse_action(b"gEt"), Ok(Action::Get));
+        assert_eq!(parse_action(b"dEl"), Ok(Action::Del));
+    }
+
+    #[test]
+    fn parse_action_unknown_command() {
+        assert_eq!(
+            parse_action(b"PING"),
+            Err(RequestError::UnknownCommand("PING".into()))
+        );
+    }
+
+    #[test]
+    fn parse_action_empty_command() {
+        assert_eq!(
+            parse_action(b""),
+            Err(RequestError::UnknownCommand("".into()))
+        );
+    }
+
+    #[test]
+    fn parse_action_invalid_utf8() {
+        assert_eq!(parse_action(b"\xFF"), Err(RequestError::InvalidUtf8));
     }
 
     #[test]

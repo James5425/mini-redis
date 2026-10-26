@@ -162,6 +162,20 @@ mod tests {
     }
 
     #[test]
+    fn handle_client_command_error_continues_processing() {
+        let mut stream =
+            TestStream::new(&[b"*1\r\n$4\r\nPING\r\n*2\r\n$3\r\nGET\r\n$5\r\nhello\r\n"]);
+        let store: Arc<Store> = Arc::new(Mutex::new(HashMap::<Vec<u8>, Vec<u8>>::new()));
+
+        handle_client(&mut stream, store);
+
+        assert_eq!(
+            stream.output,
+            b"-ERR unknown command 'PING'\r\n$-1\r\n".to_vec()
+        );
+    }
+
+    #[test]
     fn handle_client_protocol_error_stops_processing() {
         let mut stream =
             TestStream::new(&[b"?", b"*3\r\n$3\r\nSET\r\n$5\r\nhello\r\n$5\r\nworld\r\n"]);
@@ -192,17 +206,14 @@ mod tests {
     }
 
     #[test]
-    fn handle_client_command_error_continues_processing() {
-        let mut stream =
-            TestStream::new(&[b"*1\r\n$4\r\nPING\r\n*2\r\n$3\r\nGET\r\n$5\r\nhello\r\n"]);
+    fn handle_client_empty_eof() {
+        let mut stream = TestStream::default();
         let store: Arc<Store> = Arc::new(Mutex::new(HashMap::<Vec<u8>, Vec<u8>>::new()));
 
         handle_client(&mut stream, store);
 
-        assert_eq!(
-            stream.output,
-            b"-ERR unknown command 'PING'\r\n$-1\r\n".to_vec()
-        );
+        assert_eq!(stream.output, vec![]);
+        assert_eq!(stream.read_calls, 1);
     }
 
     #[test]
@@ -218,17 +229,6 @@ mod tests {
     }
 
     #[test]
-    fn handle_client_empty_eof() {
-        let mut stream = TestStream::default();
-        let store: Arc<Store> = Arc::new(Mutex::new(HashMap::<Vec<u8>, Vec<u8>>::new()));
-
-        handle_client(&mut stream, store);
-
-        assert_eq!(stream.output, vec![]);
-        assert_eq!(stream.read_calls, 1);
-    }
-
-    #[test]
     fn handle_client_read_error() {
         let mut stream = TestStream::new(&[b"*3\r\n$3\r\nSET\r\n$5\r\nhello\r\n$5\r\nwor"]);
         stream.read_error = true;
@@ -239,6 +239,21 @@ mod tests {
         assert_eq!(stream.output, vec![]);
         assert_eq!(stream.read_calls, 2);
         assert_eq!(store.lock_recover().len(), 0);
+    }
+
+    #[test]
+    fn handle_client_short_writes() {
+        let mut stream = TestStream::new(&[b"*2\r\n$3\r\nGET\r\n$5\r\nhello\r\n"]);
+        stream.max_write = Some(2);
+        let store: Arc<Store> = Arc::new(Mutex::new(HashMap::<Vec<u8>, Vec<u8>>::new()));
+        store
+            .lock_recover()
+            .insert(b"hello".to_vec(), b"world".to_vec());
+
+        handle_client(&mut stream, store);
+
+        assert_eq!(stream.output, b"$5\r\nworld\r\n".to_vec());
+        assert_eq!(stream.write_calls, 6);
     }
 
     #[test]
@@ -258,21 +273,6 @@ mod tests {
             store.lock_recover().get(b"hello".as_slice()),
             Some(&b"world".to_vec())
         );
-    }
-
-    #[test]
-    fn handle_client_short_writes() {
-        let mut stream = TestStream::new(&[b"*2\r\n$3\r\nGET\r\n$5\r\nhello\r\n"]);
-        stream.max_write = Some(2);
-        let store: Arc<Store> = Arc::new(Mutex::new(HashMap::<Vec<u8>, Vec<u8>>::new()));
-        store
-            .lock_recover()
-            .insert(b"hello".to_vec(), b"world".to_vec());
-
-        handle_client(&mut stream, store);
-
-        assert_eq!(stream.output, b"$5\r\nworld\r\n".to_vec());
-        assert_eq!(stream.write_calls, 6);
     }
 
     #[test]

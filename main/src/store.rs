@@ -7,8 +7,19 @@ use crate::protocol::{Action, Reply, request_type};
 
 pub(crate) type Store = Mutex<HashMap<Vec<u8>, Vec<u8>>>;
 
+pub(crate) fn dispatch(elements: &[Vec<u8>], kv_store: &Store) -> Reply {
+    match request_type(elements) {
+        Ok(action) => match action {
+            Action::Set => set_value(elements, kv_store),
+            Action::Del => delete_item(elements, kv_store),
+            Action::Get => get_item(elements, kv_store),
+        },
+        Err(err) => Reply::Error(err.into()),
+    }
+}
+
 /// Sets the value of key. If the key exists it is overwritten.
-pub(crate) fn set_value(elements: &[Vec<u8>], kv_store: &Store) -> Reply {
+fn set_value(elements: &[Vec<u8>], kv_store: &Store) -> Reply {
     let [_, key, value] = elements else {
         return Reply::Error("ERR wrong number of arguments for 'set' command".into());
     };
@@ -20,7 +31,7 @@ pub(crate) fn set_value(elements: &[Vec<u8>], kv_store: &Store) -> Reply {
 }
 
 /// Deletes keys from the store if they exist.
-pub(crate) fn delete_item(elements: &[Vec<u8>], kv_store: &Store) -> Reply {
+fn delete_item(elements: &[Vec<u8>], kv_store: &Store) -> Reply {
     let keys = match elements {
         [_, keys @ ..] if !keys.is_empty() => keys,
         _ => return Reply::Error("ERR wrong number of arguments for 'del' command".into()),
@@ -35,7 +46,7 @@ pub(crate) fn delete_item(elements: &[Vec<u8>], kv_store: &Store) -> Reply {
 
 /// Get the value of key. If the key does not exist, nil is returned. An error is returned if the value stored
 /// at key is not a string, because GET only handles string values.
-pub(crate) fn get_item(elements: &[Vec<u8>], kv_store: &Store) -> Reply {
+fn get_item(elements: &[Vec<u8>], kv_store: &Store) -> Reply {
     let [_, key] = elements else {
         return Reply::Error("ERR wrong number of arguments for 'get' command".into());
     };
@@ -45,17 +56,6 @@ pub(crate) fn get_item(elements: &[Vec<u8>], kv_store: &Store) -> Reply {
     match data.get(key) {
         Some(val) => Reply::Bulk(val.clone()),
         None => Reply::Nil,
-    }
-}
-
-pub(crate) fn dispatch(elements: &[Vec<u8>], kv_store: &Store) -> Reply {
-    match request_type(elements) {
-        Ok(action) => match action {
-            Action::Set => set_value(elements, kv_store),
-            Action::Del => delete_item(elements, kv_store),
-            Action::Get => get_item(elements, kv_store),
-        },
-        Err(err) => Reply::Error(err.into()),
     }
 }
 
@@ -84,6 +84,57 @@ mod tests {
     use std::{sync::Arc, thread};
 
     use super::*;
+
+    #[test]
+    fn dispatch_routes_commands() {
+        let store: Store = Mutex::new(HashMap::<Vec<u8>, Vec<u8>>::new());
+        let set_elements: [Vec<u8>; 3] = [&b"sEt"[..], b"hello", b"world"].map(|b| b.to_vec());
+        let get_elements: [Vec<u8>; 2] = [&b"gEt"[..], b"hello"].map(|b| b.to_vec());
+        let del_elements: [Vec<u8>; 2] = [&b"dEl"[..], b"hello"].map(|b| b.to_vec());
+
+        assert_eq!(dispatch(&set_elements, &store), Reply::Ok);
+        assert_eq!(
+            store.lock_recover().get(b"hello".as_slice()),
+            Some(&b"world".to_vec())
+        );
+        assert_eq!(
+            dispatch(&get_elements, &store),
+            Reply::Bulk(b"world".to_vec())
+        );
+        assert_eq!(dispatch(&del_elements, &store), Reply::Int(1));
+        assert_eq!(dispatch(&get_elements, &store), Reply::Nil);
+        assert_eq!(store.lock_recover().len(), 0);
+    }
+
+    #[test]
+    fn dispatch_invalid_commands_dont_touch_store() {
+        let store: Store = Mutex::new(HashMap::<Vec<u8>, Vec<u8>>::new());
+        store
+            .lock_recover()
+            .insert(b"hello".to_vec(), b"world".to_vec());
+
+        assert_eq!(
+            dispatch(&[], &store),
+            Reply::Error("ERR missing argument(s)".into())
+        );
+        assert_eq!(
+            dispatch(&[b"".to_vec()], &store),
+            Reply::Error("ERR unknown command ''".into())
+        );
+        assert_eq!(
+            dispatch(&[b"PING".to_vec()], &store),
+            Reply::Error("ERR unknown command 'PING'".into())
+        );
+        assert_eq!(
+            dispatch(&[b"\xFF".to_vec()], &store),
+            Reply::Error("ERR invalid data".into())
+        );
+        assert_eq!(store.lock_recover().len(), 1);
+        assert_eq!(
+            store.lock_recover().get(b"hello".as_slice()),
+            Some(&b"world".to_vec())
+        );
+    }
 
     #[test]
     fn set_value_sets_correctly() {
@@ -194,108 +245,6 @@ mod tests {
             store.lock_recover().get(&b"".to_vec()),
             Some(&b"world".to_vec())
         );
-    }
-
-    #[test]
-    fn get_item_gets_correctly() {
-        let elements: [Vec<u8>; 2] = [&b"GET"[..], b"hello"].map(|b| b.to_vec());
-        let store: Store = Mutex::new(HashMap::<Vec<u8>, Vec<u8>>::new());
-        store
-            .lock_recover()
-            .insert(b"hello".to_vec(), b"world".to_vec());
-
-        assert_eq!(get_item(&elements, &store), Reply::Bulk(b"world".to_vec()));
-        assert_eq!(store.lock_recover().len(), 1);
-        assert_eq!(
-            store.lock_recover().get(b"hello".as_slice()),
-            Some(&b"world".to_vec())
-        );
-    }
-
-    #[test]
-    fn get_item_missing_key() {
-        let elements: [Vec<u8>; 2] = [&b"GET"[..], b"missing"].map(|b| b.to_vec());
-        let store: Store = Mutex::new(HashMap::<Vec<u8>, Vec<u8>>::new());
-        store
-            .lock_recover()
-            .insert(b"hello".to_vec(), b"world".to_vec());
-
-        assert_eq!(get_item(&elements, &store), Reply::Nil);
-        assert_eq!(store.lock_recover().len(), 1);
-        assert_eq!(
-            store.lock_recover().get(b"hello".as_slice()),
-            Some(&b"world".to_vec())
-        );
-    }
-
-    #[test]
-    fn get_item_too_few_params() {
-        let elements: [Vec<u8>; 1] = [b"GET".to_vec()];
-        let store: Store = Mutex::new(HashMap::<Vec<u8>, Vec<u8>>::new());
-        store
-            .lock_recover()
-            .insert(b"hello".to_vec(), b"world".to_vec());
-
-        assert_eq!(
-            get_item(&elements, &store),
-            Reply::Error("ERR wrong number of arguments for 'get' command".into())
-        );
-        assert_eq!(store.lock_recover().len(), 1);
-        assert_eq!(
-            store.lock_recover().get(b"hello".as_slice()),
-            Some(&b"world".to_vec())
-        );
-    }
-
-    #[test]
-    fn get_item_too_many_params() {
-        let elements: [Vec<u8>; 3] = [&b"GET"[..], b"hello", b"extra"].map(|b| b.to_vec());
-        let store: Store = Mutex::new(HashMap::<Vec<u8>, Vec<u8>>::new());
-        store
-            .lock_recover()
-            .insert(b"hello".to_vec(), b"world".to_vec());
-
-        assert_eq!(
-            get_item(&elements, &store),
-            Reply::Error("ERR wrong number of arguments for 'get' command".into())
-        );
-        assert_eq!(store.lock_recover().len(), 1);
-        assert_eq!(
-            store.lock_recover().get(b"hello".as_slice()),
-            Some(&b"world".to_vec())
-        );
-    }
-
-    #[test]
-    fn get_item_binary_key_and_value() {
-        let elements: [Vec<u8>; 2] = [&b"GET"[..], b"\xFF\x00\r\n"].map(|b| b.to_vec());
-        let store: Store = Mutex::new(HashMap::<Vec<u8>, Vec<u8>>::new());
-        store
-            .lock_recover()
-            .insert(b"\xFF\x00\r\n".to_vec(), b"\x00\xFF\r\n".to_vec());
-
-        assert_eq!(
-            get_item(&elements, &store),
-            Reply::Bulk(b"\x00\xFF\r\n".to_vec())
-        );
-    }
-
-    #[test]
-    fn get_item_empty_value() {
-        let elements: [Vec<u8>; 2] = [&b"GET"[..], b"hello"].map(|b| b.to_vec());
-        let store: Store = Mutex::new(HashMap::<Vec<u8>, Vec<u8>>::new());
-        store.lock_recover().insert(b"hello".to_vec(), b"".to_vec());
-
-        assert_eq!(get_item(&elements, &store), Reply::Bulk(vec![]));
-    }
-
-    #[test]
-    fn get_item_empty_key() {
-        let elements: [Vec<u8>; 2] = [&b"GET"[..], b""].map(|b| b.to_vec());
-        let store: Store = Mutex::new(HashMap::<Vec<u8>, Vec<u8>>::new());
-        store.lock_recover().insert(b"".to_vec(), b"world".to_vec());
-
-        assert_eq!(get_item(&elements, &store), Reply::Bulk(b"world".to_vec()));
     }
 
     #[test]
@@ -415,54 +364,105 @@ mod tests {
     }
 
     #[test]
-    fn dispatch_routes_commands() {
+    fn get_item_gets_correctly() {
+        let elements: [Vec<u8>; 2] = [&b"GET"[..], b"hello"].map(|b| b.to_vec());
         let store: Store = Mutex::new(HashMap::<Vec<u8>, Vec<u8>>::new());
-        let set_elements: [Vec<u8>; 3] = [&b"sEt"[..], b"hello", b"world"].map(|b| b.to_vec());
-        let get_elements: [Vec<u8>; 2] = [&b"gEt"[..], b"hello"].map(|b| b.to_vec());
-        let del_elements: [Vec<u8>; 2] = [&b"dEl"[..], b"hello"].map(|b| b.to_vec());
+        store
+            .lock_recover()
+            .insert(b"hello".to_vec(), b"world".to_vec());
 
-        assert_eq!(dispatch(&set_elements, &store), Reply::Ok);
+        assert_eq!(get_item(&elements, &store), Reply::Bulk(b"world".to_vec()));
+        assert_eq!(store.lock_recover().len(), 1);
         assert_eq!(
             store.lock_recover().get(b"hello".as_slice()),
             Some(&b"world".to_vec())
         );
-        assert_eq!(
-            dispatch(&get_elements, &store),
-            Reply::Bulk(b"world".to_vec())
-        );
-        assert_eq!(dispatch(&del_elements, &store), Reply::Int(1));
-        assert_eq!(dispatch(&get_elements, &store), Reply::Nil);
-        assert_eq!(store.lock_recover().len(), 0);
     }
 
     #[test]
-    fn dispatch_invalid_commands_dont_touch_store() {
+    fn get_item_missing_key() {
+        let elements: [Vec<u8>; 2] = [&b"GET"[..], b"missing"].map(|b| b.to_vec());
+        let store: Store = Mutex::new(HashMap::<Vec<u8>, Vec<u8>>::new());
+        store
+            .lock_recover()
+            .insert(b"hello".to_vec(), b"world".to_vec());
+
+        assert_eq!(get_item(&elements, &store), Reply::Nil);
+        assert_eq!(store.lock_recover().len(), 1);
+        assert_eq!(
+            store.lock_recover().get(b"hello".as_slice()),
+            Some(&b"world".to_vec())
+        );
+    }
+
+    #[test]
+    fn get_item_too_few_params() {
+        let elements: [Vec<u8>; 1] = [b"GET".to_vec()];
         let store: Store = Mutex::new(HashMap::<Vec<u8>, Vec<u8>>::new());
         store
             .lock_recover()
             .insert(b"hello".to_vec(), b"world".to_vec());
 
         assert_eq!(
-            dispatch(&[], &store),
-            Reply::Error("ERR missing argument(s)".into())
-        );
-        assert_eq!(
-            dispatch(&[b"".to_vec()], &store),
-            Reply::Error("ERR unknown command ''".into())
-        );
-        assert_eq!(
-            dispatch(&[b"PING".to_vec()], &store),
-            Reply::Error("ERR unknown command 'PING'".into())
-        );
-        assert_eq!(
-            dispatch(&[b"\xFF".to_vec()], &store),
-            Reply::Error("ERR invalid data".into())
+            get_item(&elements, &store),
+            Reply::Error("ERR wrong number of arguments for 'get' command".into())
         );
         assert_eq!(store.lock_recover().len(), 1);
         assert_eq!(
             store.lock_recover().get(b"hello".as_slice()),
             Some(&b"world".to_vec())
         );
+    }
+
+    #[test]
+    fn get_item_too_many_params() {
+        let elements: [Vec<u8>; 3] = [&b"GET"[..], b"hello", b"extra"].map(|b| b.to_vec());
+        let store: Store = Mutex::new(HashMap::<Vec<u8>, Vec<u8>>::new());
+        store
+            .lock_recover()
+            .insert(b"hello".to_vec(), b"world".to_vec());
+
+        assert_eq!(
+            get_item(&elements, &store),
+            Reply::Error("ERR wrong number of arguments for 'get' command".into())
+        );
+        assert_eq!(store.lock_recover().len(), 1);
+        assert_eq!(
+            store.lock_recover().get(b"hello".as_slice()),
+            Some(&b"world".to_vec())
+        );
+    }
+
+    #[test]
+    fn get_item_binary_key_and_value() {
+        let elements: [Vec<u8>; 2] = [&b"GET"[..], b"\xFF\x00\r\n"].map(|b| b.to_vec());
+        let store: Store = Mutex::new(HashMap::<Vec<u8>, Vec<u8>>::new());
+        store
+            .lock_recover()
+            .insert(b"\xFF\x00\r\n".to_vec(), b"\x00\xFF\r\n".to_vec());
+
+        assert_eq!(
+            get_item(&elements, &store),
+            Reply::Bulk(b"\x00\xFF\r\n".to_vec())
+        );
+    }
+
+    #[test]
+    fn get_item_empty_value() {
+        let elements: [Vec<u8>; 2] = [&b"GET"[..], b"hello"].map(|b| b.to_vec());
+        let store: Store = Mutex::new(HashMap::<Vec<u8>, Vec<u8>>::new());
+        store.lock_recover().insert(b"hello".to_vec(), b"".to_vec());
+
+        assert_eq!(get_item(&elements, &store), Reply::Bulk(vec![]));
+    }
+
+    #[test]
+    fn get_item_empty_key() {
+        let elements: [Vec<u8>; 2] = [&b"GET"[..], b""].map(|b| b.to_vec());
+        let store: Store = Mutex::new(HashMap::<Vec<u8>, Vec<u8>>::new());
+        store.lock_recover().insert(b"".to_vec(), b"world".to_vec());
+
+        assert_eq!(get_item(&elements, &store), Reply::Bulk(b"world".to_vec()));
     }
 
     #[test]
